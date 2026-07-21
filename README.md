@@ -227,6 +227,18 @@ directory regardless of what's already there.
 
 ## Troubleshooting
 
+**Pulled a `requirements.txt` fix but Colab is still failing the same way.**
+Editing this repo on GitHub does not change anything in an already-open
+Colab session — Colab has its own copy of the files from whenever you last
+cloned/uploaded them. Get the updated files into Colab first (re-run your
+`git clone`/`git pull`, or re-upload), *then* re-run Section 2 (Install).
+Also note: Section 2's pip-install cell runs `pip install --upgrade`
+specifically so that re-running it actually applies a loosened version
+constraint (e.g. `peft>=0.14.0`) instead of silently leaving an
+already-installed version in place because it technically still "satisfies"
+the constraint — if you're on an older copy of this notebook without
+`--upgrade` in that cell, add it, or just re-clone.
+
 **`ValueError: numpy.dtype size changed, may indicate binary incompatibility`
 during Section 2 (Install), usually while importing `datasets`.**
 Colab's base image ships numpy 2.x with pandas/pyarrow already compiled
@@ -234,12 +246,11 @@ against it. `requirements.txt` intentionally leaves `numpy` floor-only
 (`numpy>=1.26,<3`, not exact-pinned) so `pip install` doesn't force a
 downgrade that breaks those already-compiled binaries mid-kernel-session —
 if you still hit this, it means pip changed numpy/pandas/pyarrow versions in
-this already-running process. Fix: **Runtime -> Restart session**, then
-re-run the notebook from Section 1 (no need to re-run `pip install` again —
-the packages are already installed correctly on disk, the running Python
-process just needs to reload them fresh). The Section 2 version-check cell
-reports every package's import status (not just the first failure) and
-prints this same hint automatically if anything fails.
+this already-running process. Fix: re-run Section 2's pip-install cell, then
+**Runtime -> Restart session**, then re-run the notebook from Section 1. The
+Section 2 version-check cell reports every package's import status (not
+just the first failure) and prints this same hint automatically if anything
+fails.
 
 **`peft: FAILED — Could not import module 'X'. Are this object's
 requirements defined correctly?`** (commonly `'BloomPreTrainedModel'` or
@@ -253,9 +264,9 @@ support new base models like Gemma 4, Colab may already have a
 version breaks `import peft` entirely, not just support for that one
 architecture. `peft` and `trl` are floor-only in `requirements.txt` for
 exactly this reason (they must float with whatever `transformers` version
-actually resolves) — if you still hit this, it means the versions on disk
-predate a `requirements.txt` update. Fix: re-run Section 2's pip-install
-cell (it will upgrade `peft`/`trl` to a compatible release), then
+actually resolves). Fix: re-run Section 2's pip-install cell (it runs with
+`--upgrade`, so it will actually fetch a newer, compatible `peft`/`trl`
+release this time instead of leaving an old one in place), then
 **Runtime -> Restart session**, then re-run from Section 1.
 
 **Model fails to load with an unrecognized-architecture / `KeyError` /
