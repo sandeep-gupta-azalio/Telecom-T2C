@@ -227,6 +227,20 @@ directory regardless of what's already there.
 
 ## Troubleshooting
 
+**`ValueError: numpy.dtype size changed, may indicate binary incompatibility`
+during Section 2 (Install), usually while importing `datasets`.**
+Colab's base image ships numpy 2.x with pandas/pyarrow already compiled
+against it. `requirements.txt` intentionally leaves `numpy` floor-only
+(`numpy>=1.26,<3`, not exact-pinned) so `pip install` doesn't force a
+downgrade that breaks those already-compiled binaries mid-kernel-session —
+if you still hit this, it means pip changed numpy/pandas/pyarrow versions in
+this already-running process. Fix: **Runtime -> Restart session**, then
+re-run the notebook from Section 1 (no need to re-run `pip install` again —
+the packages are already installed correctly on disk, the running Python
+process just needs to reload them fresh). The Section 2 version-check cell
+reports every package's import status (not just the first failure) and
+prints this same hint automatically if anything fails.
+
 **Model fails to load with an unrecognized-architecture / `KeyError` /
 `ValueError` on `model_type`.**
 `google/gemma-4-12B-it` postdates this project's `transformers` floor pin.

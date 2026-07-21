@@ -30,7 +30,17 @@ trl==0.15.2
 sentencepiece==0.2.0
 PyYAML==6.0.2
 protobuf==5.29.3
-numpy==1.26.4
+
+# numpy is FLOOR-ONLY, not exact-pinned, for the same reason as the
+# transformers trio above, plus a concrete Colab-specific failure mode:
+# hosted Colab images ship numpy 2.x by default with pandas/pyarrow wheels
+# already compiled against its (larger) dtype ABI. Forcing an exact numpy
+# 1.x pin here downgrades numpy without also rebuilding those already-
+# compiled binaries, producing "ValueError: numpy.dtype size changed, may
+# indicate binary incompatibility" on the first `import pandas` (pulled in
+# transitively by `datasets`). Leaving numpy unpinned-below-3 lets pip keep
+# it aligned with whatever pandas/pyarrow the Colab image already has.
+numpy>=1.26,<3
 safetensors==0.4.5
 
 # Experiment tracking. Gracefully no-ops via src/wandb_logger.py if unavailable/unauthenticated.
