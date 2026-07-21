@@ -17,27 +17,40 @@ transformers>=4.51.0
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 
-# peft and trl are ALSO floor-only, not exact-pinned, for a related reason
-# confirmed in practice: hosted Colab images already ship a transformers
-# release far ahead of this project's floor (observed: 5.12.1, a major
-# version past the reference notebook's ~4.51 baseline). Since transformers
-# is left unpinned-above to accommodate Gemma 4, an exact-pinned old peft/trl
-# release predating that transformers major version breaks at import time —
-# peft in particular does eager `from transformers import <ModelClass>`-style
-# lookups for its supported-architecture tables, and a class transformers
-# renamed/removed/reorganized in a later major version (e.g. a
-# "Could not import module 'BloomPreTrainedModel'" error) makes the whole
-# `import peft` fail, not just that architecture's support. Pinning peft/trl
-# exactly to a version proven against an old transformers, while leaving
-# transformers itself free to resolve much newer, guarantees exactly this
-# skew — so both move in lockstep with whatever transformers pip resolves.
+# peft and trl are ALSO floor-only, not exact-pinned, as a general defensive
+# practice: since transformers is left free to resolve much newer than this
+# project's floor, an exact-pinned old peft/trl release could in principle
+# predate an internal transformers API it depends on. (One real failure that
+# LOOKED like this — "Could not import module 'BloomPreTrainedModel'" while
+# importing peft — turned out to be unrelated: see the torch note below. Kept
+# floor-only regardless, since the underlying risk of peft/trl lagging a
+# much-newer transformers is still real even if it wasn't this incident's
+# cause.)
 peft>=0.14.0
 trl>=0.15.0
 
+# torch is intentionally NOT pinned/listed here at all — this is the fix for
+# a confirmed, reproduced incident: pinning torch (even loosely) makes pip
+# reinstall it in Colab with whatever CUDA-toolkit-tagged wheel satisfies the
+# constraint, which does NOT necessarily match the CUDA build of Colab's
+# pre-installed torchaudio/torchvision. Symptom observed: `import peft`
+# failing with "Could not import module 'BloomPreTrainedModel'" — the real
+# underlying exception (visible via the notebook's Install-section traceback)
+# was `RuntimeError: Detected that PyTorch and TorchAudio were compiled with
+# different CUDA versions (PyTorch 12.4 vs TorchAudio 12.1)`, raised deep in
+# a transformers audio-loss import chain that peft's own import happens to
+# pull in — nothing to do with peft/trl versions at all. Colab's pre-installed
+# torch is already correctly matched to its own CUDA driver and to
+# torchaudio/torchvision; leaving it alone (never pip-installing/upgrading it)
+# is the safest choice for this project, which only ever targets Colab.
+# transformers/peft/trl/accelerate/bitsandbytes all declare torch as a loose
+# transitive dependency, so `pip install -r requirements.txt` is satisfied by
+# whatever torch is already present without us needing to name it explicitly.
+
 # Everything below IS pinned to a concrete, mutually-compatible point release
 # — these have no equivalent tight coupling to transformers' internal
-# per-architecture class exports, so exact-pinning them is safe.
-torch==2.5.1
+# per-architecture class exports or to torch's own CUDA build, so
+# exact-pinning them is safe.
 datasets==3.2.0
 accelerate==1.2.1
 bitsandbytes==0.45.1

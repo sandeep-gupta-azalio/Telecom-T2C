@@ -254,20 +254,24 @@ fails.
 
 **`peft: FAILED — Could not import module 'X'. Are this object's
 requirements defined correctly?`** (commonly `'BloomPreTrainedModel'` or
-another per-architecture class).
-`peft` (and `trl`, which wraps it) do eager `from transformers import
-<ModelClass>`-style lookups for their supported-architecture tables. Since
-`transformers` is intentionally left unpinned-above in `requirements.txt` to
-support new base models like Gemma 4, Colab may already have a
-`transformers` release far ahead of whatever `peft`/`trl` was last installed
-— a class transformers renamed/removed/reorganized in that newer major
-version breaks `import peft` entirely, not just support for that one
-architecture. `peft` and `trl` are floor-only in `requirements.txt` for
-exactly this reason (they must float with whatever `transformers` version
-actually resolves). Fix: re-run Section 2's pip-install cell (it runs with
-`--upgrade`, so it will actually fetch a newer, compatible `peft`/`trl`
-release this time instead of leaving an old one in place), then
-**Runtime -> Restart session**, then re-run from Section 1.
+another per-architecture class), or **`RuntimeError: Detected that PyTorch
+and TorchAudio were compiled with different CUDA versions`.**
+This looks like a peft problem but usually isn't — it's peft's own import
+chain (`from transformers import BloomPreTrainedModel` in
+`peft/utils/constants.py`) transitively pulling in a `transformers`
+audio-loss module that does `import torchaudio`, and *that* is what's
+actually failing. Root cause: `torch` was reinstalled with a different
+CUDA-toolkit build than Colab's pre-installed `torchaudio`/`torchvision`
+expect. `requirements.txt` deliberately never lists `torch` at all — Colab's
+pre-installed build is already correctly matched to its own driver and to
+torchaudio/torchvision, and pinning/upgrading torch (even loosely) risks
+exactly this mismatch. Section 1 (Runtime Check) now prints the active
+`torch.__version__` / `torch.version.cuda` up front so this is visible
+immediately rather than surfacing later as a confusing peft error. If you
+still hit this, check whether anything (a stale `requirements.txt`, a manual
+`%pip install torch==...` cell, or another notebook run earlier in the same
+session) reinstalled torch — remove that, then **Runtime -> Restart
+session**, then re-run from Section 1.
 
 **Model fails to load with an unrecognized-architecture / `KeyError` /
 `ValueError` on `model_type`.**
