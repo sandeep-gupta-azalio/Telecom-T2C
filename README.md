@@ -254,24 +254,38 @@ fails.
 
 **`peft: FAILED — Could not import module 'X'. Are this object's
 requirements defined correctly?`** (commonly `'BloomPreTrainedModel'` or
-another per-architecture class), or **`RuntimeError: Detected that PyTorch
-and TorchAudio were compiled with different CUDA versions`.**
-This looks like a peft problem but usually isn't — it's peft's own import
-chain (`from transformers import BloomPreTrainedModel` in
-`peft/utils/constants.py`) transitively pulling in a `transformers`
-audio-loss module that does `import torchaudio`, and *that* is what's
-actually failing. Root cause: `torch` was reinstalled with a different
-CUDA-toolkit build than Colab's pre-installed `torchaudio`/`torchvision`
-expect. `requirements.txt` deliberately never lists `torch` at all — Colab's
-pre-installed build is already correctly matched to its own driver and to
-torchaudio/torchvision, and pinning/upgrading torch (even loosely) risks
-exactly this mismatch. Section 1 (Runtime Check) now prints the active
-`torch.__version__` / `torch.version.cuda` up front so this is visible
-immediately rather than surfacing later as a confusing peft error. If you
-still hit this, check whether anything (a stale `requirements.txt`, a manual
-`%pip install torch==...` cell, or another notebook run earlier in the same
-session) reinstalled torch — remove that, then **Runtime -> Restart
-session**, then re-run from Section 1.
+another per-architecture class), possibly with an underlying
+`AttributeError: partially initialized module 'torchaudio' has no attribute
+'lib' (circular import)` or `RuntimeError: Detected that PyTorch and
+TorchAudio were compiled with different CUDA versions` deeper in the
+traceback.
+This looks like a peft problem but isn't — `peft/utils/constants.py` does
+`from transformers import BloomPreTrainedModel`, which transitively imports
+a `transformers` audio-loss module (`transformers/loss/loss_rnnt.py`) that's
+guarded by `if is_torchaudio_available(): import torchaudio`. That guard
+only checks whether the `torchaudio` *package is present*, not whether it
+actually works — and some Colab images ship a `torchaudio` build with an
+internal bug (a circular import inside its own CUDA-version check) that
+crashes on that `import torchaudio`, taking down the entire chain that led
+to it (including `import peft`, which has nothing to do with audio at all).
+
+This project never uses `torchaudio` — Section 2 (Install) now runs
+`pip uninstall -y torchaudio` before installing `requirements.txt`, which
+makes `is_torchaudio_available()` correctly return `False` and skip that
+code path entirely. If you're on an older copy of this notebook without
+that uninstall step, pull the latest version, or run it manually:
+```python
+import subprocess, sys
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchaudio"])
+```
+then **Runtime -> Restart session**, then re-run from Section 1.
+
+(A related but distinct cause of the same symptom: `torch` itself getting
+reinstalled with a different CUDA-toolkit build than Colab's pre-installed
+torchaudio/torchvision expect. `requirements.txt` deliberately never lists
+`torch` at all, and Section 1 prints `torch.__version__` /
+`torch.version.cuda` up front so a future mismatch here is visible
+immediately.)
 
 **Model fails to load with an unrecognized-architecture / `KeyError` /
 `ValueError` on `model_type`.**
