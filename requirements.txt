@@ -17,16 +17,30 @@ transformers>=4.51.0
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 
-# Everything below is pinned to a concrete, mutually-compatible point release
-# chosen to match the reference notebook's proven call shapes (SFTConfig
-# field names, BitsAndBytesConfig, PeftModel.from_pretrained(...,
-# is_trainable=True), etc.).
+# peft and trl are ALSO floor-only, not exact-pinned, for a related reason
+# confirmed in practice: hosted Colab images already ship a transformers
+# release far ahead of this project's floor (observed: 5.12.1, a major
+# version past the reference notebook's ~4.51 baseline). Since transformers
+# is left unpinned-above to accommodate Gemma 4, an exact-pinned old peft/trl
+# release predating that transformers major version breaks at import time —
+# peft in particular does eager `from transformers import <ModelClass>`-style
+# lookups for its supported-architecture tables, and a class transformers
+# renamed/removed/reorganized in a later major version (e.g. a
+# "Could not import module 'BloomPreTrainedModel'" error) makes the whole
+# `import peft` fail, not just that architecture's support. Pinning peft/trl
+# exactly to a version proven against an old transformers, while leaving
+# transformers itself free to resolve much newer, guarantees exactly this
+# skew — so both move in lockstep with whatever transformers pip resolves.
+peft>=0.14.0
+trl>=0.15.0
+
+# Everything below IS pinned to a concrete, mutually-compatible point release
+# — these have no equivalent tight coupling to transformers' internal
+# per-architecture class exports, so exact-pinning them is safe.
 torch==2.5.1
 datasets==3.2.0
 accelerate==1.2.1
-peft==0.14.0
 bitsandbytes==0.45.1
-trl==0.15.2
 sentencepiece==0.2.0
 PyYAML==6.0.2
 protobuf==5.29.3

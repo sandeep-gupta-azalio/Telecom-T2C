@@ -241,6 +241,23 @@ process just needs to reload them fresh). The Section 2 version-check cell
 reports every package's import status (not just the first failure) and
 prints this same hint automatically if anything fails.
 
+**`peft: FAILED — Could not import module 'X'. Are this object's
+requirements defined correctly?`** (commonly `'BloomPreTrainedModel'` or
+another per-architecture class).
+`peft` (and `trl`, which wraps it) do eager `from transformers import
+<ModelClass>`-style lookups for their supported-architecture tables. Since
+`transformers` is intentionally left unpinned-above in `requirements.txt` to
+support new base models like Gemma 4, Colab may already have a
+`transformers` release far ahead of whatever `peft`/`trl` was last installed
+— a class transformers renamed/removed/reorganized in that newer major
+version breaks `import peft` entirely, not just support for that one
+architecture. `peft` and `trl` are floor-only in `requirements.txt` for
+exactly this reason (they must float with whatever `transformers` version
+actually resolves) — if you still hit this, it means the versions on disk
+predate a `requirements.txt` update. Fix: re-run Section 2's pip-install
+cell (it will upgrade `peft`/`trl` to a compatible release), then
+**Runtime -> Restart session**, then re-run from Section 1.
+
 **Model fails to load with an unrecognized-architecture / `KeyError` /
 `ValueError` on `model_type`.**
 `google/gemma-4-12B-it` postdates this project's `transformers` floor pin.
