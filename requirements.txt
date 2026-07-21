@@ -1,0 +1,45 @@
+# Telecom-T2C-Trainer — pinned dependencies
+#
+# Anchored to the reference notebook's already-proven-working floor versions:
+#   transformers>=4.51.0, trl>=0.15.0, peft>=0.14.0, bitsandbytes>=0.45.0, accelerate>=1.2.0
+#
+# transformers / tokenizers / huggingface_hub are deliberately FLOOR-ONLY, not
+# pinned to an exact version. google/gemma-4-12B-it was released after this
+# project's authoring, so the true minimum transformers version that
+# recognizes its architecture is not knowable ahead of time — pinning a
+# guessed exact number risks being wrong in either direction (too old ->
+# unrecognized model_type; a fabricated "looks right" number -> may not
+# actually exist). src/model.py's load_base_model() has a runtime capability
+# check with an actionable error message ("pip install -U transformers") as
+# the real safety net here, not this pin. At install time, prefer the newest
+# available release of these three packages.
+transformers>=4.51.0
+tokenizers>=0.21.0
+huggingface_hub>=0.26.0
+
+# Everything below is pinned to a concrete, mutually-compatible point release
+# chosen to match the reference notebook's proven call shapes (SFTConfig
+# field names, BitsAndBytesConfig, PeftModel.from_pretrained(...,
+# is_trainable=True), etc.).
+torch==2.5.1
+datasets==3.2.0
+accelerate==1.2.1
+peft==0.14.0
+bitsandbytes==0.45.1
+trl==0.15.2
+sentencepiece==0.2.0
+PyYAML==6.0.2
+protobuf==5.29.3
+numpy==1.26.4
+safetensors==0.4.5
+
+# Experiment tracking. Gracefully no-ops via src/wandb_logger.py if unavailable/unauthenticated.
+wandb==0.19.1
+
+# Optional — used only by src/utils.get_gpu_stats() for GPU utilization %.
+# Import is guarded (try/except) everywhere it's used; omit this line entirely
+# if installation fails in your environment, memory stats will still work.
+nvidia-ml-py==12.560.30
+
+# Testing
+pytest==8.3.4

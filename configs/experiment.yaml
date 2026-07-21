@@ -1,0 +1,123 @@
+# =============================================================================
+# Telecom-T2C-Trainer — experiment configuration
+#
+# This is the ONLY file you should need to edit between runs. Every module in
+# src/ reads its settings from here (via src/config.py). Paths that start with
+# "/content/" are Colab-runtime paths (Google Drive mount point) and won't
+# exist on a local machine — that's expected, this project targets Colab.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# identity: run/version bookkeeping. Written into manifest.json and wandb.
+# -----------------------------------------------------------------------------
+identity:
+  experiment_name: telecom_t2c_gemma4        # human label; used for run dir + wandb run name
+  dataset_version: phase1                    # tag identifying the dataset snapshot in use
+  lora_version: v1                           # semantic version of this adapter lineage
+  generator_version: unknown                 # version tag of the pipeline that produced the JSONL
+  validator_version: unknown                 # version tag of the dataset-validation pipeline
+  seed: 42                                   # global RNG seed (python/numpy/torch/HF)
+
+# -----------------------------------------------------------------------------
+# data: dataset paths and loading limits.
+# Dataset is multi-turn chat JSONL: {"messages": [...]}. See README "Dataset format".
+# -----------------------------------------------------------------------------
+data:
+  train_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/train_sft_batched.jsonl
+  val_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/val_sft_batched.jsonl
+  golden_path: null                          # optional golden eval JSONL; skipped gracefully if unset/missing
+  eval_source: val                           # "val" | "golden" — which split feeds loss-based eval during training
+  max_train_samples: null                    # cap on training rows (seeded random sample); null = full dataset
+  max_eval_samples: 256                      # cap on eval rows
+  max_seq_length: 1536                       # token cap; feeds SFTConfig.max_length and packing
+
+# -----------------------------------------------------------------------------
+# model: base model + adapter continuation.
+# -----------------------------------------------------------------------------
+model:
+  base_model: google/gemma-4-12B-it          # HF repo id
+  continue_adapter: null                     # path to a prior LoRA adapter dir; null = fresh LoRA init
+  hf_token_env_var: HF_TOKEN                 # env var / Colab secret name holding the HF token
+  attn_implementation: auto                  # "auto" | "flash_attention_2" | "sdpa"; auto tries flash then falls back
+  torch_dtype: bfloat16                      # compute dtype for QLoRA compute + unquantized layers
+
+# -----------------------------------------------------------------------------
+# lora: LoRA hyperparameters. Used for fresh init; ignored (adapter's own
+# config wins) when continue_adapter is set.
+# -----------------------------------------------------------------------------
+lora:
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: null                  # null = auto-detect all nn.Linear projections at runtime
+  lora_bias: none                            # peft.LoraConfig(bias=...)
+
+# -----------------------------------------------------------------------------
+# training: TRL SFTTrainer / SFTConfig knobs.
+# -----------------------------------------------------------------------------
+training:
+  epochs: 1.0                                # num_train_epochs
+  learning_rate: 0.0001                      # NOTE: carried over from the reference notebook's
+                                              # continue-training default; consider 2e-4 for fresh init
+                                              # (this run) — see README "Troubleshooting".
+  batch_size: 4                              # per_device_train_batch_size
+  eval_batch_size: 4                         # per_device_eval_batch_size
+  gradient_accumulation: 4                   # effective batch size = batch_size * gradient_accumulation
+  packing: true                              # TRL sequence packing
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  lr_scheduler_type: cosine
+  optim: paged_adamw_8bit
+  logging_steps: 50
+  eval_steps: 500
+  save_steps: 1000
+  save_total_limit: 2                        # keep best + latest (HF Trainer protects the best checkpoint)
+  reasoning: true                            # documented no-op on data content today (dataset already
+                                              # contains fixed PASS_0-4 turns); reserved for future use
+  gradient_checkpointing: true
+
+# -----------------------------------------------------------------------------
+# evaluation: loss-based + golden generation eval, early stopping.
+# -----------------------------------------------------------------------------
+evaluation:
+  run_eval: true
+  early_stopping: false
+  early_stopping_patience: 3
+  early_stopping_threshold: 0.0
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  max_new_tokens_eval: 512
+
+# -----------------------------------------------------------------------------
+# wandb: Weights & Biases logging. Gracefully disables itself if unavailable
+# or not logged in — training never blocks on wandb.
+# -----------------------------------------------------------------------------
+wandb:
+  wandb_project: telecom-t2c-trainer
+  wandb_entity: null
+  wandb_mode: online                         # "online" | "offline" | "disabled"
+  wandb_log_gpu_stats: true
+  wandb_watch_model: false                   # wandb.watch() is expensive on 12B models; opt-in
+
+# -----------------------------------------------------------------------------
+# drive: Google Drive auto-mount / auto-sync of run artifacts.
+# -----------------------------------------------------------------------------
+drive:
+  google_drive_directory: /content/drive/MyDrive/telecom_t2c   # null disables Drive sync
+  copy_to_drive: true
+  drive_mount_point: /content/drive
+
+# -----------------------------------------------------------------------------
+# hardware: GPU selection / profile override.
+# -----------------------------------------------------------------------------
+hardware:
+  training_gpu: 0                            # sets CUDA_VISIBLE_DEVICES
+  gpu_profile_override: null                 # "A100" | "L4" | "T4" | null = auto-detect
+
+# -----------------------------------------------------------------------------
+# reproducibility: output layout + resume behavior.
+# -----------------------------------------------------------------------------
+reproducibility:
+  output_directory: outputs                  # root for outputs/runs/run_YYYYMMDD_HHMMSS/
+  resume_training: true                      # auto-detect and resume the most recent interrupted run
+  run_id: null                               # override auto timestamp naming to target a specific run dir
