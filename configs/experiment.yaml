@@ -27,7 +27,7 @@ data:
   val_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/val_sft_batched.jsonl
   golden_path: null                          # optional golden eval JSONL; skipped gracefully if unset/missing
   eval_source: val                           # "val" | "golden" — which split feeds loss-based eval during training
-  max_train_samples: null                    # cap on training rows (seeded random sample); null = full dataset
+  max_train_samples: 50                    # cap on training rows (seeded random sample); null = full dataset
   max_eval_samples: 256                      # cap on eval rows
   max_seq_length: 1536                       # token cap; feeds SFTConfig.max_length and packing
 
@@ -93,8 +93,8 @@ evaluation:
 # or not logged in — training never blocks on wandb.
 # -----------------------------------------------------------------------------
 wandb:
-  wandb_project: telecom-t2c-trainer
-  wandb_entity: null
+  wandb_project: Telecom_T2C
+  wandb_entity: sandygmaharaj-amaltas
   wandb_mode: online                         # "online" | "offline" | "disabled"
   wandb_log_gpu_stats: true
   wandb_watch_model: false                   # wandb.watch() is expensive on 12B models; opt-in

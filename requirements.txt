@@ -53,7 +53,7 @@ trl>=0.15.0
 # exact-pinning them is safe.
 datasets==3.2.0
 accelerate==1.2.1
-bitsandbytes==0.45.1
+bitsandbytes>=0.46.1
 sentencepiece==0.2.0
 PyYAML==6.0.2
 protobuf==5.29.3
