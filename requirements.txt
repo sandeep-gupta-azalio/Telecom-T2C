@@ -84,7 +84,7 @@ protobuf==5.29.3
 safetensors==0.4.5
 
 # Experiment tracking. Gracefully no-ops via src/wandb_logger.py if unavailable/unauthenticated.
-wandb==0.19.1
+wandb==0.28.1
 
 # Optional — used only by src/utils.get_gpu_stats() for GPU utilization %.
 # Import is guarded (try/except) everywhere it's used; omit this line entirely
