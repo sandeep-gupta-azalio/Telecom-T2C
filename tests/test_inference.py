@@ -31,7 +31,17 @@ class FakeTokenizer:
         prompt = " | ".join(m["content"] for m in messages)
         return f"PROMPT:{prompt}"
 
-    def __call__(self, text, return_tensors="pt"):
+    def __call__(self, images=None, *, text=None, return_tensors="pt"):
+        # Mirrors the REAL bug this stand-in guards against: Gemma 4 is
+        # nominally multimodal, so Unsloth/transformers loads the real
+        # tokenizer as a Gemma4UnifiedProcessor whose __call__ signature is
+        # (self, images=None, text=None, videos=None, audio=None, **kwargs).
+        # `images` deliberately comes first and `text` is keyword-only here
+        # so that a regression back to a positional `tokenizer(prompt, ...)`
+        # call in inference.generate() fails loudly (prompt would bind to
+        # `images`, then this assert catches it) instead of silently passing.
+        assert images is None, "text must be passed as a keyword, not positionally (see inference.generate())"
+        assert text is not None
         return _FakeBatchEncoding(
             {
                 "input_ids": torch.tensor([[1, 3, 4]]),

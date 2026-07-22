@@ -118,7 +118,17 @@ def generate(model: Any, tokenizer: Any, messages: list[dict], max_new_tokens: i
     """
     prompt = build_prompt(tokenizer, messages)
     device = _infer_device(model)
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    # text= must be an explicit keyword, not positional: Gemma 4 is nominally
+    # multimodal, so Unsloth/transformers loads `tokenizer` as a
+    # Gemma4UnifiedProcessor whose __call__ signature is
+    # (self, images=None, text=None, videos=None, audio=None, **kwargs) — a
+    # positional tokenizer(prompt, ...) call binds prompt to `images` instead
+    # of `text`, and the processor then tries to interpret the entire prompt
+    # string as an image URL/path/base64 (confirmed, reproduced: `ValueError:
+    # Incorrect image source ... Failed with Incorrect padding`). A plain
+    # AutoTokenizer's __call__ also names its first parameter `text`, so this
+    # keyword form is correct for both.
+    inputs = tokenizer(text=prompt, return_tensors="pt").to(device)
 
     try:
         out = greedy_decode(

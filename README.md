@@ -732,6 +732,24 @@ documented workaround for a known Gemma+PEFT+transformers `model.generate()`
 bug) and falls back to `model.generate(do_sample=False)` on any exception,
 logging a warning either way — check the logs to see which path ran.
 
+**`ValueError: Incorrect image source. Must be a valid URL starting with
+`http://` or `https://`, a valid path to an image file, or a base64
+encoded string. Got <bos><|turn>system...`** during Section 12 (Smoke
+Test), inside `transformers/image_utils.py`'s `load_image_as_tensor`.
+A real, confirmed bug that was in this project's own `inference.py`, not
+an environment issue: Gemma 4 is nominally multimodal, so Unsloth loads
+`tokenizer` as a `Gemma4UnifiedProcessor`, whose `__call__` signature is
+`(self, images=None, text=None, videos=None, audio=None, **kwargs)` —
+`images` comes *first*. `inference.generate()` used to call
+`tokenizer(prompt, return_tensors="pt")` with the prompt string
+**positional**, which silently bound it to `images` instead of `text`; the
+processor then tried to interpret the entire formatted chat prompt as an
+image URL/path/base64 string, failing exactly as shown. Fixed by calling
+`tokenizer(text=prompt, return_tensors="pt")` with `text` as an explicit
+keyword — correct for both a plain `AutoTokenizer` (whose `__call__` also
+names its first parameter `text`) and a multimodal processor. If you're on
+an older clone with this bug, `git pull`.
+
 **Checkpoint / GPU unavailable / missing dataset errors generally.**
 Every module in `src/` raises actionable, specific exceptions (not bare
 `Exception`) for these cases — read the message, it names the exact config
