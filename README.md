@@ -106,19 +106,34 @@ available during development) — start with a small `data.max_train_samples`
 smoke test before trusting a full run, same practice recommended throughout
 this README.
 
-**Known, currently-unresolved upstream risk**: Unsloth builds its LoRA
-support on `peft`, and `peft` has previously had zero working PyPI release
-for `transformers>=4.55` (see the `ImportError: cannot import name
-'BloomPreTrainedModel'` entry in Troubleshooting). `requirements.txt` floors
-`peft`/`accelerate`/`trl`/`datasets` just above validated versions rather
-than exact-matching them, specifically so `pip install --upgrade` (Section
-2) has room to pick up a compatibility fix without a `requirements.txt`
-edit. Separately, Unsloth's own `exec()`-based monkeypatching of
-transformers internals periodically breaks when transformers renames
-something internal (see
-[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415));
-`unsloth`/`unsloth_zoo` are left fully unpinned for the same reason — see
-`requirements.txt`'s comments for the full reasoning on each pin.
+**Confirmed, worked-around upstream constraint**: `unsloth`/`unsloth_zoo`'s
+own PyPI-published metadata hard-caps `transformers<=5.5.0` (confirmed by
+downloading and unzipping their actual wheel METADATA, not just reading
+GitHub source), but `google/gemma-4-12B-it`'s `gemma4_unified` architecture
+is only recognized starting at `transformers==5.10.0`. Section 2 (Install)
+does not resolve these two together — it installs the correlated Unsloth
+stack (`unsloth`, `unsloth_zoo`, `bitsandbytes`, `accelerate`, `peft`,
+`trl`, `triton`, `xformers`) with `--no-deps` in one phase, then
+`transformers`/`tokenizers` with `--no-deps` in a separate, later phase —
+mirroring
+[Unsloth's own official Colab recipe for a newer Gemma 4 variant](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Gemma4_(26B_A4B)-Vision.ipynb)
+rather than inventing a workaround from scratch. See `requirements.txt`'s
+top comment and the notebook's Section 2 markdown/code for the full,
+empirically-verified reasoning (including what breaks if you resolve them
+together instead: pip backtracks `unsloth`/`unsloth_zoo` down to an
+ancient, pre-Gemma-4 release).
+
+Separately, Unsloth's own `exec()`-based monkeypatching of transformers
+internals periodically breaks when transformers renames something internal
+(see
+[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415))
+— confirmed directly during this project's development at
+`transformers==5.12.1` (`NameError: name 'auto_docstring' is not defined`),
+which is why `transformers==5.10.2` is exact-pinned rather than left to
+float upward. `peft` has also previously had zero working PyPI release for
+`transformers>=4.55` (see the `ImportError: cannot import name
+'BloomPreTrainedModel'` entry in Troubleshooting) — the Install cell's
+`peft>=0.19.1` floor is specifically the first release confirmed past that.
 
 Implementation notes, if you're reading the code:
 - `model.load_base_model()` returns `(model, tokenizer)` together — Unsloth
@@ -135,10 +150,13 @@ Implementation notes, if you're reading the code:
 - `utils.disable_unused_transformers_backends()` is called before any
   transformers/unsloth import in `tokenizer.load_tokenizer()` and
   `model.load_base_model()` (and once more, as early as possible, at the end
-  of the notebook's Install cell) — it permanently neutralizes two confirmed,
-  recurring import-time crashes unrelated to anything this project actually
-  uses (broken `torchaudio`/`torchao` installs on some Colab images; see
-  Troubleshooting for the full history).
+  of the notebook's Install cell) — it permanently neutralizes transformers'
+  own torchaudio/torchao-mediated import paths regardless of whether either
+  package is actually installed or working, since this project never uses
+  either directly (text-only; always bitsandbytes 4-bit, never TorchAO
+  quantization). This is a second line of defense on top of, not a
+  replacement for, Section 2's own torchaudio uninstall / torchao version
+  floor — see Troubleshooting for the full incident history behind both.
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -379,11 +397,12 @@ internal bug (a circular import inside its own CUDA-version check) that
 crashes on that `import torchaudio`, taking down the entire chain that led
 to it (including `import peft`, which has nothing to do with audio at all).
 
-This project never uses `torchaudio` — Section 2 (Install) now runs
-`pip uninstall -y torchaudio` before installing `requirements.txt`, which
-makes `is_torchaudio_available()` correctly return `False` and skip that
-code path entirely. If you're on an older copy of this notebook without
-that uninstall step, pull the latest version, or run it manually:
+This project never uses `torchaudio` — Section 2 (Install) uninstalls it
+unconditionally (`pip uninstall -y -q torchaudio`, run as the last install
+step, after all four install phases), which makes
+`is_torchaudio_available()` correctly return `False` and skip that code
+path entirely. If you're on an older copy of this notebook without that
+uninstall step, pull the latest version, or run it manually:
 ```python
 import subprocess, sys
 subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchaudio"])
@@ -392,72 +411,56 @@ then **Runtime -> Restart session**, then re-run from Section 1.
 
 (A related but distinct cause of the same symptom: `torch` itself getting
 reinstalled with a different CUDA-toolkit build than Colab's pre-installed
-torchaudio/torchvision expect. `requirements.txt` deliberately never lists
-`torch` at all, and Section 1 prints `torch.__version__` /
+torchaudio/torchvision expect. Nothing in this project's install commands
+ever lists `torch` at all, and Section 1 prints `torch.__version__` /
 `torch.version.cuda` up front so a future mismatch here is visible
 immediately.)
 
-**`unsloth`/`unsloth_zoo`: FAILED to import** (or, in a different session,
-**`ModuleNotFoundError: Could not import module 'AutoProcessor'`** while
-loading the tokenizer in Section 4) **with `AttributeError:
+**`unsloth`/`unsloth_zoo`: FAILED to import**, with `AttributeError:
 '_OpNamespace' '_c10d_functional' object has no attribute
-'_wrap_tensor_autograd'`, or `ModuleNotFoundError: No module named
-'torchao'`,** deep in a traceback through `torchao/dtypes/nf4tensor.py` or
-`transformers/quantizers/quantizer_torchao.py`.
+'_wrap_tensor_autograd'` deep in a traceback through
+`torchao/dtypes/nf4tensor.py` (via `transformers/quantizers/quantizer_torchao.py`).
 The exact same bug class as the `torchaudio` entry above, this time via
 `torchao`: any `Auto*` class (`AutoProcessor`, `AutoTokenizer`,
 `AutoModelForCausalLM`, ...) transitively imports
 `transformers/modeling_utils.py`, which unconditionally imports
 `transformers/quantizers/auto.py` (needed for `AutoHfQuantizer`, regardless
 of which quantization backend you actually use — this project only ever
-uses bitsandbytes 4-bit, never TorchAO). `quantizers/auto.py`
+uses bitsandbytes 4-bit, never TorchAO directly). `quantizers/auto.py`
 unconditionally imports `quantizer_torchao.py`, which itself only imports
 `torchao.prototype.safetensors.safetensors_support` when
 `is_torchao_available()` is `True` — but, same as the `torchaudio` case,
 that check only confirms `torchao` is *present*, not that importing it
-actually works.
+actually works. If the installed `torchao` build expects a torch op
+signature the installed torch build doesn't register under that name
+(`torch.ops._c10d_functional._wrap_tensor_autograd`), that reference raises
+`AttributeError`, uncaught.
 
-Two distinct symptoms have both been confirmed from this same root cause:
-- **`torchao` present but broken**: the guarded import transitively pulls in
-  `torchao/dtypes/nf4tensor.py`, which references a specific
-  `torch.ops._c10d_functional._wrap_tensor_autograd` op at module import
-  time — on a Colab image where the installed `torchao` build expects a
-  different torch op signature than the installed torch build actually
-  registers, that reference raises `AttributeError`, uncaught.
-- **`torchao` absent, but `is_torchao_available()` still returns `True`**:
-  that check is `@lru_cache`d, so if it was ever called even once earlier in
-  the *same kernel process* — before an uninstall took effect, or across
-  cells without an intervening restart — the cached `True` result never
-  re-checks reality again for the rest of that process. A later uninstall
-  (even a correctly-ordered one) can leave it stuck, and the guarded import
-  then fails with a plain `ModuleNotFoundError: No module named 'torchao'`
-  instead.
-
-This project never uses `torchao`, so **the durable fix doesn't rely on
-`torchao` actually being absent at all**: `utils.disable_unused_transformers_backends()`
-directly monkeypatches `is_torchaudio_available`/`is_torchao_available` in
-`transformers.utils` to unconditionally return `False`, sidestepping both
-the "present but broken" and "stale cache" failure modes at once — see its
-docstring in `src/utils.py` for the full reasoning. It's called as early as
-possible: at the end of Section 2's Install cell (before Section 2's own
-diagnostic `import unsloth` below it), and defensively again at the top of
-`tokenizer.load_tokenizer()` and `model.load_base_model()` in case either is
-ever called without Section 2 having run first in that kernel. Section 2
-also still runs `pip uninstall -y -q torchaudio torchao` **after** installing
-`requirements.txt` (not before — `unsloth_zoo`'s own `pyproject.toml`
-unconditionally declares `torchao>=0.13.0` as a base dependency, confirmed
-by reading it directly on GitHub, so an uninstall *before* the install just
-gets silently reinstalled by that very next step) as a secondary, disk-space
-line of defense, but the monkeypatch above is what actually makes this
-robust regardless of ordering or process staleness. If you're on an older
-copy of this notebook without the monkeypatch call, pull the latest version,
-or run it manually right now:
-```python
-from src import utils
-utils.disable_unused_transformers_backends()
-```
-then continue from wherever you were — no restart needed for this specific
-fix, since it takes effect immediately in the current process.
+Unlike `torchaudio`, this project can't just uninstall `torchao` —
+`unsloth_zoo`'s own metadata declares `torchao>=0.13.0` as a genuine
+dependency of its own code (not just something transformers' quantizer
+machinery incidentally imports), and an earlier version of this notebook
+that uninstalled it outright risked breaking whatever unsloth_zoo itself
+uses it for. Two things fix this together, mirroring
+[Unsloth's own official Colab recipe](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Gemma4_(26B_A4B)-Vision.ipynb):
+- Section 2's Phase 3 installs `torchao>=0.16.0` explicitly (`--no-deps
+  --upgrade`) rather than letting an unconstrained `pip install` pick
+  whatever's latest — the theory (matching Unsloth's own choice of floor)
+  being that an under-constrained torchao version was the actual cause of
+  the mismatch above, not torchao categorically.
+- `utils.disable_unused_transformers_backends()` (called at the end of
+  Section 2, and defensively again at the top of `tokenizer.load_tokenizer()`
+  and `model.load_base_model()`) directly monkeypatches
+  `is_torchaudio_available`/`is_torchao_available` in `transformers.utils`
+  to unconditionally return `False` — see its docstring in `src/utils.py`.
+  This means transformers' own quantizer-chain crash above is neutralized
+  *regardless* of whether Phase 3's floor actually works on a given Colab
+  image, since this project never routes through TorchAO quantization
+  directly anyway. If you're on an older copy of this notebook without
+  either fix, pull the latest version, then **Runtime -> Restart session**,
+  then re-run from Section 1. (The monkeypatch itself needs no restart if
+  you just want to apply it manually right now:
+  `from src import utils; utils.disable_unused_transformers_backends()`.)
 
 **`TypeError: Accelerator.unwrap_model() got an unexpected keyword argument
 'keep_torch_compile'`** during Section 9 (Train), inside
@@ -467,13 +470,12 @@ A genuine version-skew bug, not a Colab environment artifact: `transformers`'
 `self.accelerator.unwrap_model(model, keep_torch_compile=False)`, and that
 `keep_torch_compile` parameter doesn't exist in older `accelerate` releases.
 `transformers` is exact-pinned (`==5.10.2`, required for Gemma 4 — see
-below) but `accelerate`, `peft`, `trl`, and `datasets` are deliberately
-left floor-only (`accelerate>=1.8`, `peft>=0.19.1`, `trl>=0.15.0`,
-`datasets>=3.2`) so pip has room to resolve versions that are actually
-compatible with `transformers==5.10.2`, rather than this project guessing and
-hand-pinning exact companions. Fix: re-run Section 2's pip-install cell
-(it uses `pip install --upgrade` so a floor-pin bump actually applies), then
-**Runtime -> Restart session**, then re-run from Section 1.
+below), installed via Section 2's Phase 4, while `accelerate`, `peft`, and
+`trl` (Phase 2) are deliberately left floor-only (`accelerate>=1.8`,
+`peft>=0.19.1`, `trl>=0.15.0`) so re-running Install can still pick up a
+newer compatible release without a code edit. Fix: re-run Section 2's
+Install cell (every phase uses `--upgrade` so a floor-pin bump actually
+applies), then **Runtime -> Restart session**, then re-run from Section 1.
 
 **`AttributeError: 'list' object has no attribute 'keys'`** inside
 `transformers/tokenization_utils_base.py`'s
@@ -488,9 +490,9 @@ Confirmed, not a version-gating nuance: `google/gemma-4-12B-it`'s
 [huggingface/transformers#45376](https://github.com/huggingface/transformers/issues/45376)
 and the
 [google/gemma-4-E4B-it discussion](https://huggingface.co/google/gemma-4-E4B-it/discussions/17).
-**Gemma 4 genuinely requires transformers v5** for this reason —
-`requirements.txt` exact-pins `transformers==5.10.2` (a version confirmed to
-handle this correctly). `tokenizer.py` also carries a defensive compat shim
+**Gemma 4 genuinely requires transformers v5** for this reason — Section 2's
+Phase 4 exact-pins `transformers==5.10.2` (a version confirmed to handle
+this correctly). `tokenizer.py` also carries a defensive compat shim
 (`patch_extra_special_tokens_list_format()`, applied automatically by
 `load_tokenizer()` and by both `model.load_base_model()` and
 `inference.load_model_for_inference()`, since Unsloth builds its own
@@ -510,12 +512,12 @@ issue above: older `peft` releases had zero working PyPI release for
 `transformers>=4.55` — see
 [huggingface/peft#2754](https://github.com/huggingface/peft/issues/2754)
 ("No working peft version available in PyPI for transformers 4.55+").
-`requirements.txt` floor-pins `peft>=0.19.1` specifically because that's the
-first release confirmed to import cleanly against `transformers==5.10.2`
-(the exact-pinned version this project uses — see the tokenizer entry
+Section 2's Phase 2 floor-pins `peft>=0.19.1` specifically because that's
+the first release confirmed to import cleanly against
+`transformers==5.10.2` (installed in Phase 4 — see the tokenizer entry
 above). If you still hit this, `pip` likely resolved an older cached `peft`
-wheel: re-run Section 2's pip-install cell (it uses `pip install --upgrade`
-so this actually applies), then **Runtime -> Restart session**, then re-run
+wheel: re-run Section 2's Install cell (every phase uses `--upgrade` so
+this actually applies), then **Runtime -> Restart session**, then re-run
 from Section 1. If it persists even on a genuinely fresh install, that's a
 new regression in the `peft`/`transformers` compatibility matrix beyond what
 this project has verified — check the issue above for its current state.
@@ -529,39 +531,54 @@ inside that `exec()` call — not a clean `ImportError`. `model.load_base_model(
 catches this broadly (not just `ImportError`) and re-raises an actionable
 `RuntimeError`.
 
-**Root cause, confirmed by reading unsloth's own `pyproject.toml` directly**
-(both `unslothai/unsloth` and `unslothai/unsloth-zoo`, as of this writing):
-they declare `transformers>=4.51.3,...,!=5.0.0,!=5.1.0,<=5.5.0` as their
-tested ceiling. An earlier version of this project's `requirements.txt`
-exact-pinned `transformers==5.12.1`, which is *above* that ceiling; pip
-still installed it without complaint (that PyPI release's metadata didn't
-hard-block it — an empirical sign that the declared ceiling in the
-`pyproject.toml` on GitHub's `main` branch lags behind what's actually
-published/enforced on PyPI), but unsloth's `_utils.py` patch code — written
-against transformers source up to around `5.5.0` — didn't know how to
-handle whatever changed structurally in later releases (heavier use of the
-`@auto_docstring` decorator, evidently), raising this `NameError` at import
-time.
+**Root cause, confirmed empirically (not just by reading GitHub source,
+which lags behind what's published)**: every `unsloth`/`unsloth_zoo` PyPI
+release from `2026.6.1` through `2026.7.4` (the latest at time of writing)
+was downloaded and unzipped directly to inspect its wheel METADATA — all of
+them declare `transformers>=4.51.3,...,!=5.0.0,!=5.1.0,<=5.5.0` as a real,
+pip-enforced dependency, not an optional extra. This crash has been hit
+from **both directions** of that ceiling:
+- **Too new** (an earlier version of this project's `requirements.txt`
+  exact-pinned `transformers==5.12.1`, above the ceiling): pip installed it
+  without complaint at the time (a sign the ceiling had drifted, or that
+  specific release's resolution didn't hard-block it), but unsloth's
+  `_utils.py` patch code — written against transformers source up to
+  around `5.5.0` — didn't know how to handle whatever changed structurally
+  in later releases (heavier use of the `@auto_docstring` decorator,
+  evidently), raising this exact `NameError`.
+- **Too old** (a later attempt resolved `unsloth`/`unsloth_zoo` and an
+  exact transformers pin *above* 5.5.0 in the same plain
+  `pip install -r requirements.txt` call): since no 2026.x
+  `unsloth`/`unsloth_zoo` release's metadata allows a transformers version
+  above 5.5.0, pip's resolver backtracked all the way down to an ancient
+  release from **September 2025** to find *something* that didn't conflict
+  — reproduced as `unsloth: FAILED to import (pip-installed version:
+  2025.9.5)`, with this exact same `auto_docstring` `NameError`, because
+  that ancient release predates Gemma 4 (and the `auto_docstring` pattern)
+  entirely.
 
-`requirements.txt` now exact-pins `transformers==5.10.2` — **not** `5.5.0`
-— because `5.5.0` turned out to be too *old* for a different reason: see
-the `gemma4_unified` entry below. `5.10.2` is a narrow, specifically-verified
-window that satisfies both constraints — new enough for transformers to
-recognize Gemma 4's architecture, old enough that unsloth's current patches
-still handle it — per
-[unslothai/unsloth#6054](https://github.com/unslothai/unsloth/pull/6054)
-(merged by unsloth's own maintainer specifically to fix Gemma-4-12B
-loading). If you're on an older clone of this repo pinning `5.12.1` or
-`5.5.0`, `git pull` to get the corrected pin, then re-run Section 2
-(Install), then **Runtime -> Restart session**, then re-run from Section 1.
-`unsloth`/`unsloth_zoo` themselves stay fully unpinned (per Unsloth's own
-recommendation) so a fresh install still picks up the latest patch set *for*
-`transformers==5.10.2` — see
+The actual fix (Section 2, Phases 2-4) is not a version-pin tweak at all —
+it's installing the correlated Unsloth stack (`unsloth`, `unsloth_zoo`,
+`bitsandbytes`, `accelerate`, `peft`, `trl`, `triton`, `xformers`) together
+with `--no-deps` in one phase, then `transformers`/`tokenizers` together
+with `--no-deps` in a separate, later phase, so pip's resolver never
+attempts to satisfy unsloth's declared ceiling against this project's
+actual transformers version at all. This isn't a workaround invented for
+this project — it's copied directly from
+[Unsloth's own official Colab notebook for a newer Gemma 4 variant](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Gemma4_(26B_A4B)-Vision.ipynb),
+adapted here for `google/gemma-4-12B-it` (that notebook pins
+`transformers==5.5.0`, correct for *its* model but too old for
+`gemma4_unified` — see the next entry). If you're on an older copy of this
+notebook using a single flat `pip install -r requirements.txt` for
+everything, pull the latest version, then **Runtime -> Restart session**,
+then re-run from Section 1. If this crash recurs even with the phased
+install, `unsloth`/`unsloth_zoo` themselves are left fully unpinned in
+Phase 2 specifically so a fresh install picks up whatever the latest
+release actually is — check
 [unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415)
-for the general class of bug. If this pin needs to move again, re-check
-unsloth's current issue tracker for this exact model first (not just its
-`pyproject.toml`, which has proven to lag) — and watch for this same
-`auto_docstring`-style crash recurring at whatever new version is tried.
+for the general class of bug, and re-verify with `pip download <pkg>==<ver>
+--no-deps` + unzipping the wheel's `METADATA` file (the method used to
+confirm the above) rather than trusting `pyproject.toml` on GitHub alone.
 
 **`ValueError: The checkpoint you are trying to load has model type
 'gemma4_unified' but Transformers does not recognize this architecture`**
@@ -569,18 +586,30 @@ unsloth's current issue tracker for this exact model first (not just its
 supported yet in `transformers==X.Y.Z`. Please update transformers... ``)
 while loading the model in Section 7.
 The opposite problem from the entry above: transformers only registered the
-`gemma4_unified` architecture (Gemma 4 12B's actual model type) in a later
-release than this project's earlier `transformers==5.5.0` pin — confirmed
-via transformers' own `gemma4_unified` modeling code first existing at tag
-`v5.10.2`. This is an exact match for
+`gemma4_unified` architecture (Gemma 4 12B's actual model type) starting at
+`transformers==5.10.0` — confirmed directly against
+`transformers/models/auto/auto_mappings.py` at each tag (absent at
+5.6.0-5.9.0, present at 5.10.0/5.10.1/5.10.2/5.11.0; note this data moved
+out of the older `configuration_auto.py` file in transformers' own v5
+refactor, so searching the wrong file gives a false "not found"). This is
+an exact match for
 [unslothai/unsloth#5985](https://github.com/unslothai/unsloth/issues/5985)
 ("unsloth-zoo pins transformers<=5.5.0 but Gemma 4 12B needs a newer
 version"), fixed by unsloth's maintainer in
 [unslothai/unsloth#6054](https://github.com/unslothai/unsloth/pull/6054) by
-pairing this exact model with `transformers==5.10.2`. `requirements.txt`
-now pins that version. If you're on an older clone still pinning `5.5.0`,
-`git pull`, re-run Section 2 (Install), then **Runtime -> Restart session**,
-then re-run from Section 1.
+pairing this exact model with `transformers==5.10.2` inside Unsloth
+Studio's per-model "sidecar" environments — a mechanism that lives in their
+separate desktop app, not in the plain `pip install unsloth` package this
+project uses, which is why Section 2's Phase 4 reimplements the *version
+pairing* (transformers==5.10.2) via its own `--no-deps` install rather than
+reusing Unsloth's installer directly. `google/gemma-4-12B-it`'s own HF repo
+ships no `trust_remote_code`/`auto_map` custom modeling code either, so
+there's no way to sidestep transformers' built-in architecture
+registration — the transformers version genuinely has to be new enough.
+If you're on an older copy of this notebook pinning `5.5.0` (or resolving
+transformers as part of a single flat `pip install -r requirements.txt`),
+pull the latest version, then **Runtime -> Restart session**, then re-run
+from Section 1.
 
 **`OutOfMemoryError: CUDA out of memory` during Section 9 (Train), even on
 A100 40GB.**

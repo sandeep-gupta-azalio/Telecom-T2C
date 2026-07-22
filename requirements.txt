@@ -1,58 +1,100 @@
 # Telecom-T2C-Trainer — pinned dependencies
 #
 # This project is Unsloth-only (see src/model.py / README "Model backend").
-# transformers==5.10.2 is exact-pinned deliberately. This has moved twice
-# before landing here — each move is load-bearing history, not dead code:
-# 1. transformers v5 is required outright for Gemma 4's tokenizer format
-#    (v4.x cannot load it at all — see tokenizer.py's
-#    patch_extra_special_tokens_list_format() docstring). Any v5.x satisfies
-#    this part.
-# 2. An exact pin of transformers==5.12.1 installed fine at the pip level but
-#    failed at runtime with `NameError: name 'auto_docstring' is not
-#    defined` inside unsloth's exec()-based transformers-internals patching
-#    (unsloth/models/_utils.py) — confirmed via unslothai/unsloth's own
-#    pyproject.toml declaring "transformers>=4.51.3,...,<=5.5.0" as its
-#    tested ceiling, well below 5.12.1. This project then capped down to
-#    transformers==5.5.0 to stay within that ceiling.
-# 3. transformers==5.5.0 turned out to be too OLD instead: `google/gemma-4-12B-it`
-#    uses the `gemma4_unified` model_type/architecture, which transformers
-#    only registered in a later release (its modeling code first appears at
-#    tag v5.10.2), so loading failed with `ValueError: The checkpoint you are
-#    trying to load has model type 'gemma4_unified' but Transformers does not
-#    recognize this architecture` -> Unsloth's own wrapper turns this into
-#    "`google/gemma-4-12B-it` is not supported yet in `transformers==5.5.0`."
-#    This is a confirmed, exact match for
-#    https://github.com/unslothai/unsloth/issues/5985 ("unsloth-zoo pins
-#    transformers<=5.5.0 but Gemma 4 12B needs a newer version"), fixed by
-#    unsloth's own maintainer in
-#    https://github.com/unslothai/unsloth/pull/6054, which pairs Gemma-4-12B
-#    specifically with transformers==5.10.2 — the version that added
-#    `gemma4_unified` support. That PR predates 5.12.1 (where unsloth's own
-#    patching breaks per point 2 above), so 5.10.2 is the narrow window that
-#    satisfies both constraints at once: new enough to recognize Gemma 4's
-#    architecture, old enough for unsloth's current exec()-based patches to
-#    still work against it.
-# Note: unsloth/unsloth-zoo's `main`-branch pyproject.toml still declares its
-# ceiling as <=5.5.0 as of this writing, which appears to lag behind what
-# they've actually shipped/fixed on PyPI (an empirical fact confirmed by
-# 5.12.1 installing without a pip-level conflict at all in point 2 above,
-# despite exceeding that declared ceiling) — so do not treat that file as
-# authoritative on its own; the GitHub issue/PR above are the more current,
-# specific signal for this exact model. If this pin needs to move again,
-# re-check both: unsloth's current issue tracker for this model, and whether
-# the auto_docstring-style patching crash recurs at the new version.
-# peft/accelerate/bitsandbytes/datasets are floor-pinned just above this
-# combination rather than exact-matched to it, since they still need room to
-# pick up compatibility fixes for it (see the peft note below) without
-# requiring a requirements.txt edit each time.
-transformers==5.10.2
-tokenizers>=0.21.0
-huggingface_hub>=0.26.0
+#
+# IMPORTANT: transformers, tokenizers, unsloth, unsloth_zoo, bitsandbytes,
+# accelerate, peft, trl, triton, and xformers are intentionally NOT listed in
+# this file at all — they're installed by the notebook's Section 2 (Install)
+# via a multi-phase `--no-deps` sequence that mirrors Unsloth's own official
+# Colab install recipe, not a plain `pip install -r requirements.txt`. Why:
+#
+# `unsloth`/`unsloth_zoo`'s PyPI-published metadata hard-caps
+# transformers<=5.5.0 — confirmed not by reading GitHub source (which lags
+# behind what's published) but by downloading and unzipping the actual wheel
+# METADATA for every unsloth/unsloth_zoo release from 2026.6.1 through
+# 2026.7.4 (the latest at time of writing): every single one declares
+# "transformers>=4.51.3,...,<=5.5.0" as a real, pip-enforced Requires-Dist,
+# not an optional extra. But `google/gemma-4-12B-it` uses the
+# `gemma4_unified` architecture, which transformers only registered starting
+# at release 5.10.0 (confirmed directly against transformers'
+# models/auto/auto_mappings.py at each tag — absent at 5.6.0-5.9.0, present
+# at 5.10.0/5.10.1/5.10.2/5.11.0) — so transformers genuinely needs to be
+# newer than what unsloth's own metadata allows. If a normal
+# `pip install -r requirements.txt` lists an exact transformers pin above
+# 5.5.0 alongside unsloth/unsloth_zoo, pip's resolver must satisfy both
+# constraints at once; since no 2026.x unsloth/unsloth_zoo release allows
+# it, pip backtracks all the way down to an ancient September-2025 release
+# that predates Gemma 4 (and the `auto_docstring` decorator pattern)
+# entirely — reproduced as `unsloth: FAILED to import (pip-installed
+# version: 2025.9.5)` with the exact same `NameError: name 'auto_docstring'
+# is not defined` crash this project hit before, but for the opposite
+# reason (too OLD this time, not too new). google/gemma-4-12B-it's own repo
+# ships no `trust_remote_code`/`auto_map` custom modeling code either, so
+# there's no way to sidestep transformers' built-in architecture
+# registration.
+#
+# The fix: install the whole correlated ML stack (unsloth_zoo, bitsandbytes,
+# accelerate, xformers, peft, trl, triton, unsloth) together with
+# `--no-deps` in one pip call, then transformers+tokenizers together with
+# `--no-deps` in a separate call — so pip never attempts to resolve
+# unsloth/unsloth_zoo's declared transformers ceiling against this project's
+# actual transformers version at all. This is not a workaround this project
+# invented: it is copied directly from Unsloth's own official reference
+# Colab notebook for a newer Gemma 4 variant (confirmed by reading its
+# install cell verbatim —
+# https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Gemma4_(26B_A4B)-Vision.ipynb),
+# adapted here for `google/gemma-4-12B-it` specifically (that notebook pins
+# transformers==5.5.0, which is correct for ITS model but predates
+# `gemma4_unified`'s registration — see above). See notebook Section 2 for
+# the exact multi-phase install commands and version floors used (they
+# mirror this file's floors below, just expressed as explicit pip arguments
+# instead of requirements.txt lines, since `--no-deps` and phase-grouping
+# can't be expressed in a flat requirements file).
+#
+# transformers==5.10.2 is the specific version installed in that second
+# phase: high enough to recognize `gemma4_unified` (see above), but not so
+# high that unsloth's own exec()-based transformers-internals patching
+# (unsloth/models/_utils.py) breaks — an earlier attempt at
+# transformers==5.12.1 crashed with the same auto_docstring NameError from
+# the OTHER direction (too new for unsloth's current patches, per
+# https://github.com/unslothai/unsloth/issues/3415's general bug class).
+# 5.10.2 is also the version unsloth's own maintainer paired with
+# Gemma-4-12B specifically in
+# https://github.com/unslothai/unsloth/pull/6054 (fixing
+# https://github.com/unslothai/unsloth/issues/5985 — "unsloth-zoo pins
+# transformers<=5.5.0 but Gemma 4 12B needs a newer version"), though that
+# PR's actual mechanism (per-model "sidecar" environments) lives inside
+# Unsloth Studio, their separate desktop app — NOT in the plain
+# `pip install unsloth` package this project uses, which is why the version
+# number is useful signal but the install mechanism had to be reimplemented
+# (the multi-phase install above) rather than reused directly.
+#
+# If this pin needs to move again: re-check unsloth's current issue tracker
+# for this exact model (its pyproject.toml has proven to lag behind what's
+# actually fixed/shipped) and Unsloth's own reference notebooks for this
+# model family, and watch for the auto_docstring-style crash recurring in
+# either direction at the new version.
+#
+# huggingface_hub's floor below (>=1.5.0,<2.0) is NOT unsloth_zoo's own
+# requirement (which only floors it at >=0.34.0) — it's transformers
+# 5.10.2's own declared requirement (confirmed via its PyPI metadata:
+# "huggingface-hub<2.0,>=1.5.0"). Since huggingface_hub is resolved in the
+# FIRST (normal, deps-following) install phase — before transformers gets
+# force-installed with --no-deps in the second phase — this floor must be
+# set high enough here for transformers' actual need, or the second phase
+# would silently pair transformers==5.10.2 with a too-old huggingface_hub
+# that phase never re-validates.
+huggingface_hub>=1.5.0,<2.0
 
-peft>=0.19.1
-trl>=0.15.0
-accelerate>=1.8
-datasets>=3.2
+# datasets' range below matches unsloth_zoo's own declared compatibility
+# (confirmed via its PyPI metadata: "datasets!=4.0.*,!=4.1.0,<4.4.0,>=3.4.1")
+# even though datasets itself is resolved in the normal (deps-following)
+# first install phase, not the --no-deps phase — because unsloth/unsloth_zoo
+# themselves are excluded from that first phase's resolution (they move to
+# phase two, see above), nothing else in this file would otherwise enforce
+# their datasets compatibility range; this floor/ceiling has to be copied
+# here explicitly to compensate.
+datasets>=3.4.1,!=4.0.*,!=4.1.0,<4.4.0
 
 # Known, currently-unresolved upstream risk this pin set does NOT fully
 # rule out: peft has had no working PyPI release for transformers>=4.55 in
@@ -60,54 +102,37 @@ datasets>=3.2
 # "No working peft version available in PyPI for transformers 4.55+";
 # reproduced during this project's development as `ImportError: cannot
 # import name 'BloomPreTrainedModel' from 'transformers'` at a standalone
-# `import peft`). If that surfaces again despite the floor above, it's a
-# peft/transformers compatibility gap to track upstream, not a bug in this
-# project — see README Troubleshooting. It does not necessarily block the
-# Unsloth-mediated LoRA path (`from unsloth import FastModel`) even when a
-# standalone `import peft` fails, since Unsloth may not exercise the exact
-# broken code path — which is also why the notebook's Section 2 version
-# check no longer probes `peft` directly, only `unsloth`/`unsloth_zoo`.
+# `import peft`). The notebook's phased install floors peft>=0.19.1
+# specifically because that's the first release confirmed to import
+# cleanly against transformers>=4.55 (transformers==5.10.2, used here, is
+# well past that threshold). If that surfaces again despite the floor, it's
+# a peft/transformers compatibility gap to track upstream, not a bug in
+# this project — see README Troubleshooting. It does not necessarily block
+# the Unsloth-mediated LoRA path (`from unsloth import FastModel`) even
+# when a standalone `import peft` fails, since Unsloth may not exercise the
+# exact broken code path — which is also why the notebook's Section 2
+# version-check cell no longer probes `peft` directly, only
+# `unsloth`/`unsloth_zoo`.
 
-# unsloth: custom kernels/patches for a curated set of architectures,
-# confirmed to include the Gemma 4 family (unsloth/gemma-4-12b-it exists on
-# the Hub), typically cutting VRAM usage substantially for QLoRA versus a
-# plain transformers+bitsandbytes path. Deliberately left UNPINNED (not
-# even floor-only) — it needs to resolve a version actually compatible with
-# whatever transformers/peft/trl/torch/CUDA Colab has *today*, and
-# Unsloth's own installer explicitly recommends auto-detection
-# (`--torch-backend=auto`) over manual pinning for this reason.
-#
-# unsloth_zoo is listed explicitly too, not left to resolve transitively:
-# unsloth's own exec()-based patching of transformers internals periodically
-# breaks when transformers renames something internal (confirmed pattern —
-# see https://github.com/unslothai/unsloth/issues/3415), and the
-# maintainers' fix for that class of bug has historically landed as
-# companion PRs across BOTH unsloth and unsloth_zoo. Leaving unsloth_zoo
-# unlisted would let it resolve independently and possibly miss the paired
-# fix even when `unsloth` itself is current.
-unsloth_zoo
-unsloth
-
-# torch is intentionally NOT pinned/listed here at all — confirmed,
-# reproduced incident: pinning torch (even loosely) makes pip reinstall it
-# in Colab with whatever CUDA-toolkit-tagged wheel satisfies the
-# constraint, which does NOT necessarily match the CUDA build of Colab's
-# pre-installed torchaudio/torchvision, causing native-extension crashes
-# deep in unrelated import chains. Colab's pre-installed torch is already
-# correctly matched to its own CUDA driver and to torchaudio/torchvision;
-# leaving it alone (never pip-installing/upgrading it) is the safest choice
-# for this project, which only ever targets Colab. Every package above
-# declares torch as a loose transitive dependency, so `pip install -r
-# requirements.txt` is satisfied by whatever torch is already present
-# without us needing to name it explicitly.
+# torch is intentionally NOT pinned/listed here (or anywhere in the
+# notebook's install commands) at all — confirmed, reproduced incident:
+# pinning torch (even loosely) makes pip reinstall it in Colab with
+# whatever CUDA-toolkit-tagged wheel satisfies the constraint, which does
+# NOT necessarily match the CUDA build of Colab's pre-installed
+# torchaudio/torchvision, causing native-extension crashes deep in
+# unrelated import chains. Colab's pre-installed torch is already correctly
+# matched to its own CUDA driver and to torchaudio/torchvision; leaving it
+# alone (never pip-installing/upgrading it) is the safest choice for this
+# project, which only ever targets Colab.
 
 # Everything below IS pinned/floored to a concrete release — no equivalent
 # tight coupling to transformers'/peft's internal APIs or to torch's own
-# CUDA build, so this is safe.
-bitsandbytes>=0.46.1
-sentencepiece==0.2.0
+# CUDA build, so this is safe to resolve normally via
+# `pip install -r requirements.txt` in the notebook's first install phase.
+sentencepiece>=0.2.0
 PyYAML==6.0.2
 protobuf==5.29.3
+hf_transfer
 
 # numpy is intentionally NOT listed here at all — same reasoning as torch
 # above, confirmed by a second, distinct incident: even a floor-only numpy
