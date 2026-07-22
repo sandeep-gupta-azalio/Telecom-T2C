@@ -10,31 +10,41 @@
 # guessed exact number risks being wrong in either direction (too old ->
 # unrecognized model_type; a fabricated "looks right" number -> may not
 # actually exist). src/model.py's load_base_model() has a runtime capability
-# check with an actionable error message ("pip install -U transformers") as
-# the real safety net here, not this pin. At install time, prefer the newest
-# available release of these three packages.
+# check with an actionable error message as the real safety net here, not
+# this pin. At install time, prefer the newest available release of these
+# three packages.
 #
-# transformers ALSO carries an explicit upper bound, <4.55.0 — an
-# unfortunately real, unresolved tension with the floor-only reasoning
-# above, not a clean fix: peft currently has ZERO working PyPI release for
-# transformers>=4.55 (confirmed —
+# NO upper bound here, even though one was tried and reverted: transformers
+# genuinely CANNOT be capped below v5 for this project, confirmed via two
+# independent upstream sources —
+# https://github.com/huggingface/transformers/issues/45376 and
+# https://huggingface.co/google/gemma-4-E4B-it/discussions/17 — Gemma 4's
+# tokenizer_config.json uses transformers v5's list-format
+# `extra_special_tokens`, and v4.x's `_set_model_specific_special_tokens`
+# unconditionally calls `.keys()` on it (a v4-only, dict-shaped assumption),
+# raising `AttributeError: 'list' object has no attribute 'keys'` — this
+# happens in Section 4 (tokenizer loading), which runs on EITHER
+# model.backend, before any backend-specific code. A `<4.55.0` cap (tried
+# to work around a separate `peft` incompatibility — see below) makes
+# tokenizer loading impossible outright, which is strictly worse than the
+# peft problem it was meant to avoid. src/tokenizer.py additionally carries
+# a defensive compat shim for this exact AttributeError, so Section 4 stays
+# robust even if a future resolve somehow lands on an older transformers
+# again.
+#
+# Known separate, still-open risk this does NOT resolve: peft has no
+# working PyPI release for transformers>=4.55 (confirmed —
 # https://github.com/huggingface/peft/issues/2754, "No working peft version
-# available in PyPI for transformers 4.55+"; reproduced here too, with the
+# available in PyPI for transformers 4.55+"; reproduced here with the
 # latest available peft 0.19.1: `ImportError: cannot import name
-# 'BloomPreTrainedModel' from 'transformers'` at `import peft`, which is
-# unconditional and happens before any peft feature is actually used).
-# BOTH model.backend options transitively need `import peft` to succeed
-# (unsloth builds its LoRA support on peft too), so this isn't a
-# per-backend problem — without this cap, neither backend gets past
-# `import peft`. If Gemma 4 itself turns out to need transformers>=4.55,
-# Section 7 (Load Model) will fail with an unrecognized-architecture error
-# despite Section 2 succeeding — that would mean this cap is currently
-# incompatible with Gemma 4 support, and there is no clean resolution until
-# peft ships a fix; raising/removing this upper bound then just trades one
-# broken import for the other. Revisit this cap periodically — remove it
-# once peft's own PyPI metadata (not just this file) declares real support
-# for newer transformers, rather than waiting on this comment to go stale.
-transformers>=4.51.0,<4.55.0
+# 'BloomPreTrainedModel' from 'transformers'` at `import peft`). That failure
+# is unconditional at `import peft` — not fixable by capping transformers,
+# since Gemma 4 needs v5 regardless — so it may still surface later, in
+# Section 8 (Load Adapter) on either backend (unsloth builds its LoRA
+# support on peft too), rather than in Section 2/4. If it does, that's a
+# genuine, currently-unresolved gap between peft's and Gemma 4's release
+# timelines, not a bug in this project's code — see README Troubleshooting.
+transformers>=4.51.0
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 

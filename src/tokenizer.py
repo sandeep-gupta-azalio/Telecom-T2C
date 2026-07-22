@@ -15,6 +15,57 @@ from src import utils
 
 logger = utils.get_logger("tokenizer")
 
+_PATCH_MARKER = "_t2c_extra_special_tokens_patch"
+
+
+def patch_extra_special_tokens_list_format() -> None:
+    """Defensive compat shim for a confirmed transformers v4-vs-v5 incompatibility.
+
+    google/gemma-4-12B-it's tokenizer_config.json defines "extra_special_tokens"
+    as a list (transformers v5's format). transformers v4.x's
+    PreTrainedTokenizerBase._set_model_specific_special_tokens unconditionally
+    calls `.keys()` on that field (a v4-only, dict-shaped assumption), raising
+    `AttributeError: 'list' object has no attribute 'keys'` — confirmed via
+    https://github.com/huggingface/transformers/issues/45376 and
+    https://huggingface.co/google/gemma-4-E4B-it/discussions/17. Since
+    requirements.txt intentionally leaves transformers unpinned-above (Gemma 4
+    itself requires v5 for this reason), this should be moot in practice — but
+    patches defensively anyway so tokenizer loading stays robust even if a
+    future resolve somehow lands on an older transformers again.
+
+    Safe by construction: only intervenes when calling the *original* method
+    raises exactly this AttributeError (i.e. only on the buggy v4.x
+    implementation). Transformers v5's own (correct) list handling is never
+    touched — the original method is always tried first and used as-is
+    whenever it doesn't raise. Idempotent — safe to call multiple times.
+    """
+    try:
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+    except ImportError:
+        return
+
+    current = PreTrainedTokenizerBase._set_model_specific_special_tokens
+    if getattr(current, _PATCH_MARKER, False):
+        return  # already patched
+
+    original = current
+
+    def _patched(self, special_tokens):  # type: ignore[no-untyped-def]
+        try:
+            return original(self, special_tokens)
+        except AttributeError:
+            if isinstance(special_tokens, list):
+                logger.info(
+                    "Patched around a transformers v4/v5 extra_special_tokens format "
+                    "mismatch (list -> dict) — see tokenizer.py's "
+                    "patch_extra_special_tokens_list_format docstring."
+                )
+                return original(self, {str(token): token for token in special_tokens})
+            raise
+
+    setattr(_patched, _PATCH_MARKER, True)
+    PreTrainedTokenizerBase._set_model_specific_special_tokens = _patched
+
 
 def resolve_hf_token(env_var_name: str = "HF_TOKEN") -> Optional[str]:
     """Resolve a Hugging Face token from the environment, then Colab secrets.
@@ -48,6 +99,8 @@ def load_tokenizer(model_id: str, hf_token: Optional[str] = None) -> Any:
     notebook exactly.
     """
     from transformers import AutoProcessor, AutoTokenizer
+
+    patch_extra_special_tokens_list_format()
 
     try:
         tok = AutoTokenizer.from_pretrained(model_id, token=hf_token)

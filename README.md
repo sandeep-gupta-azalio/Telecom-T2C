@@ -102,7 +102,13 @@ Both options load-bear on `peft` (Unsloth builds its LoRA support on peft
 too), so a `peft`/`transformers` incompatibility blocks either choice
 equally — see the `ImportError: cannot import name 'BloomPreTrainedModel'`
 entry in Troubleshooting for a real, currently-unresolved case of exactly
-that, and why `requirements.txt` caps `transformers<4.55.0` because of it.
+that. **`transformers` is deliberately left uncapped despite this** — Gemma
+4's tokenizer config requires transformers v5's format outright (confirmed,
+not a version-gating nuance; see the `AttributeError: 'list' object has no
+attribute 'keys'` entry below), so capping transformers to dodge the peft
+issue would make tokenizer loading fail instead, on both backends, which is
+worse. These are two separate, currently-unresolved upstream compatibility
+gaps, not one problem — see Troubleshooting for both.
 
 **`unsloth` hit a real failure on one Colab image**, and it's worth
 understanding exactly what kind before trusting it again: `from unsloth
@@ -415,46 +421,56 @@ Since `transformers` is intentionally left floor-only to support Gemma 4,
 reason. Fix: re-run Section 2's pip-install cell, then
 **Runtime -> Restart session**, then re-run from Section 1.
 
-**Model fails to load with an unrecognized-architecture / `KeyError` /
-`ValueError` on `model_type`.**
-`google/gemma-4-12B-it` postdates this project's `transformers` floor pin.
-Normally the fix would be "just upgrade transformers" — **but read the next
-entry first**, because `requirements.txt` currently caps `transformers` at
-`<4.55.0` for an unrelated, currently-unresolved reason (a `peft` bug), and
-blindly upgrading past that cap reintroduces a *different* failure. `model.py`'s
-`load_base_model()` also attempts an `AutoModelForImageTextToText` fallback
-automatically before raising either way.
+**`AttributeError: 'list' object has no attribute 'keys'`** inside
+`transformers/tokenization_utils_base.py`'s
+`_set_model_specific_special_tokens`, while loading the tokenizer (Section
+4, `tokenizer.load_tokenizer()` — this runs on **either** `model.backend`).
+Confirmed, not a version-gating nuance: `google/gemma-4-12B-it`'s
+`tokenizer_config.json` defines `extra_special_tokens` as a **list**
+(transformers v5's format), but `transformers` v4.x's
+`_set_model_specific_special_tokens` unconditionally calls `.keys()` on it
+(a v4-only, dict-shaped assumption) — see
+[huggingface/transformers#45376](https://github.com/huggingface/transformers/issues/45376)
+and the
+[google/gemma-4-E4B-it discussion](https://huggingface.co/google/gemma-4-E4B-it/discussions/17).
+**Gemma 4 genuinely requires transformers v5** for this reason —
+`requirements.txt` deliberately leaves `transformers` uncapped so pip can
+resolve v5. `tokenizer.py` also carries a defensive compat shim
+(`patch_extra_special_tokens_list_format()`, applied automatically by
+`load_tokenizer()` and by both Unsloth loading paths in `model.py`/
+`inference.py`) that converts the list to a dict only if the installed
+transformers actually hits this exact `AttributeError` — a no-op on v5,
+where the native list handling is used as-is. If you still hit this, re-run
+Section 2 (Install) to make sure `transformers` actually resolved to v5 (the
+version-check cell prints it).
 
 **`ImportError: cannot import name 'BloomPreTrainedModel' from
 'transformers'`** at `import peft` (in Section 2's version-check cell, or
-anywhere else `peft` gets imported).
-This is a real, currently-unresolved upstream incompatibility, not something
-this project's code can route around: **`peft` has zero working PyPI
-release for `transformers>=4.55`** — confirmed via
+anywhere else `peft` gets imported) — **or** the model failing to load with
+an unrecognized-architecture / `KeyError` / `ValueError` on `model_type`.
+This is a real, currently-unresolved upstream incompatibility, separate from
+the tokenizer issue above, and this project's code cannot fully route around
+it: **`peft` has zero working PyPI release for `transformers>=4.55`** —
+confirmed via
 [huggingface/peft#2754](https://github.com/huggingface/peft/issues/2754)
 ("No working peft version available in PyPI for transformers 4.55+"),
-reproduced here with the latest available `peft` (0.19.1) against
-`transformers` 4.57.2. The failure is unconditional — it happens the instant
-`import peft` runs, before any peft feature is actually used — so it blocks
-**both** `model.backend` options equally (Unsloth's LoRA support is built on
-peft too). `requirements.txt` now pins `transformers>=4.51.0,<4.55.0` as the
-only available workaround.
+reproduced here with the latest available `peft` (0.19.1). The failure is
+unconditional — it happens the instant `import peft` runs, before any peft
+feature is actually used — so it blocks **both** `model.backend` options
+equally (Unsloth's LoRA support is built on peft too).
 
-**This trades one problem for a real, unresolved risk**, and it's worth
-being honest about rather than pretending it's clean: nothing confirms
-Gemma 4 actually works below `transformers` 4.55 — the model card's only
-guidance is "upgrade to latest," which if anything suggests it wants
-something *newer*. If Section 2 now succeeds but Section 7 (Load Model)
-fails with an unrecognized-architecture error, that means Gemma 4 genuinely
-needs `transformers>=4.55`, and there is currently no transformers version
-that satisfies both Gemma 4 and a working `peft` at the same time — that's
-not a bug in this project to fix, it's a real gap between two upstream
-projects' release cadences. The only paths forward at that point: wait for
-`peft` to ship a fix for `transformers>=4.55` (check the issue above), or
-patch around the broken import yourself. Don't try to "fix" it by just
-raising the cap without confirming `peft`'s status has actually changed —
-that silently reintroduces the `import peft` failure this cap exists to
-avoid.
+**This project does NOT cap `transformers` to work around it** (an earlier
+version of this README/`requirements.txt` did, briefly — that cap was
+reverted because it broke tokenizer loading outright, per the entry above,
+which is worse). So this failure may still occur, typically surfacing later
+in the notebook than the tokenizer issue — at Section 8 (Load Adapter, where
+`peft`/Unsloth's LoRA attachment actually runs) rather than Section 2 or 4.
+If it does: that's a genuine gap between `peft`'s and Gemma 4's release
+timelines, not a bug in this project to fix. The only paths forward: wait
+for `peft` to ship a fix for `transformers>=4.55` (check the issue above),
+or patch around the broken import yourself, similar in spirit to the
+tokenizer compat shim above (not implemented here, since the right patch
+depends on exactly what `peft` release/fix state you're on).
 
 **`NameError: name 'auto_docstring' is not defined`** (or any other
 non-`ImportError` exception) **while loading `model.backend: unsloth`.**
@@ -559,9 +575,13 @@ validation), model-loading logic (`resolve_target_modules`, GPU profile
 table, attention-implementation resolution, backend-dispatch error paths —
 not actual 4-bit weight downloads for either backend), trainer
 initialization (`build_sft_config` field mapping, including the
-backend-aware gradient-checkpointing branch — no real `.train()` call), and
+backend-aware gradient-checkpointing branch — no real `.train()` call),
 inference (`build_prompt`, `generate()`'s greedy-decode-then-fallback logic
-against fake model/tokenizer stand-ins). Tests requiring an unavailable
+against fake model/tokenizer stand-ins), and the tokenizer v4/v5
+`extra_special_tokens` compat shim (`patch_extra_special_tokens_list_format`
+against fake buggy/fixed method stand-ins — the exact real-world
+`AttributeError` this guards against is covered by the shim's own logic
+tests, not by loading real Gemma 4 weights). Tests requiring an unavailable
 package (e.g. `trl` if not installed locally) or a GPU skip cleanly rather
 than failing. The `unsloth` backend's actual model loading is not covered by
 these tests — it needs a GPU and is unverified by this project (see "Model

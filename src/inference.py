@@ -76,6 +76,12 @@ def load_model_for_inference_unsloth(
             "proven-working plain transformers+peft path."
         ) from exc
 
+    from src.tokenizer import patch_extra_special_tokens_list_format
+
+    # See model.py's load_base_model_unsloth for why: FastModel constructs a
+    # tokenizer internally, bypassing tokenizer.py's own load_tokenizer().
+    patch_extra_special_tokens_list_format()
+
     logger.info("Reloading Unsloth adapter %s for inference...", adapter_dir)
     try:
         model, tokenizer = FastModel.from_pretrained(

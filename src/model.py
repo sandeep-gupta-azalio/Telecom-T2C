@@ -26,6 +26,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from src import tokenizer as tokenizer_mod
 from src import utils
 from src.config import ExperimentConfig, LoraConfigSection, ModelConfig
 
@@ -198,13 +199,12 @@ def load_base_model(model_config: ModelConfig, hf_token: Optional[str], device_i
             raise RuntimeError(
                 f"Could not load {model_config.base_model}: unrecognized architecture with the "
                 "installed transformers version, and no AutoModelForImageTextToText fallback class "
-                "is available. This model may require a newer transformers release than "
-                "requirements.txt currently allows (transformers is capped at <4.55.0 there because "
-                "peft has no working PyPI release above that yet — see requirements.txt's comment "
-                "and https://github.com/huggingface/peft/issues/2754). Do NOT just run "
-                "`pip install -U transformers` — that reintroduces the peft import failure this cap "
-                "exists to avoid. Check whether peft has shipped a fix for transformers>=4.55 first; "
-                "if so, raise the cap in requirements.txt deliberately, not via an ad hoc upgrade."
+                "is available. This model may require a newer transformers release — try: "
+                "pip install -U transformers. Separately, note that `import peft` currently has no "
+                "working PyPI release for transformers>=4.55 (see "
+                "https://github.com/huggingface/peft/issues/2754) — that's a real, distinct, "
+                "currently-unresolved issue that may surface later at Section 8 (Load Adapter) "
+                "regardless of this fix; see README Troubleshooting."
             ) from exc
         try:
             model = fallback_cls.from_pretrained(
@@ -219,10 +219,8 @@ def load_base_model(model_config: ModelConfig, hf_token: Optional[str], device_i
             raise RuntimeError(
                 f"Could not load {model_config.base_model} via AutoModelForCausalLM or "
                 f"AutoModelForImageTextToText: {exc2}. This model may require a newer transformers "
-                "release than requirements.txt currently allows (capped at <4.55.0 because peft has "
-                "no working PyPI release above that yet — see requirements.txt's comment and "
-                "https://github.com/huggingface/peft/issues/2754). Don't just `pip install -U "
-                "transformers`; that reintroduces the peft import failure this cap avoids."
+                "release — try: pip install -U transformers. See also the note on peft's separate, "
+                "unresolved transformers>=4.55 incompatibility in README Troubleshooting."
             ) from exc2
 
     model.config.use_cache = False
@@ -337,6 +335,12 @@ def load_base_model_unsloth(
             "model.backend='transformers' in configs/experiment.yaml to fall back to the "
             "proven-working plain transformers+peft path — no other code changes needed."
         ) from exc
+
+    # FastModel constructs a tokenizer internally, bypassing tokenizer.py's
+    # load_tokenizer() — apply the same defensive compat shim directly so
+    # this path is equally robust to the transformers v4/v5
+    # extra_special_tokens format mismatch (see tokenizer.py).
+    tokenizer_mod.patch_extra_special_tokens_list_format()
 
     logger.info("Loading base model %s via Unsloth FastModel (4-bit QLoRA)...", model_config.base_model)
     try:
