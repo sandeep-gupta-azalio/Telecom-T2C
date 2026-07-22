@@ -107,6 +107,26 @@ def load_base_model(
     this point forward, not a separately-loaded one (see notebook Section 7,
     which reassigns its `tokenizer` variable to this return value).
     """
+    # Must be set before importing unsloth below: this is Unsloth's own
+    # documented escape hatch (UNSLOTH_COMPILE_DISABLE) for disabling their
+    # torch.compile/dynamo-based auto-compiler. Defaulted to disabled here
+    # because gemma4_unified is an extremely new addition to Unsloth (its
+    # architecture shares KV state across layers — Gemma 4's
+    # num_kv_shared_layers design — and there is a confirmed, separate
+    # upstream bug class where use_cache=False, which training with
+    # gradient checkpointing forces, causes those KV-shared layers to
+    # recompute incorrectly; serious enough that Unsloth shipped a full
+    # re-release over it, not just a patch). This project hit a concrete,
+    # reproduced symptom of instability in this compiled path: `Internal
+    # TorchDynamoError: AcceleratorError: CUDA error: an illegal memory
+    # access was encountered` during Section 10 (Evaluate), surfacing
+    # inside dynamo's own tracing of Unsloth's compiled
+    # Gemma4UnifiedTextAttention/RMSNorm forward. Disabling the compiler
+    # trades some speed for correctness/stability on this very new,
+    # actively-changing model family — setdefault so an explicit override
+    # (e.g. once Unsloth confirms this is fixed) is respected.
+    os.environ.setdefault("UNSLOTH_COMPILE_DISABLE", "1")
+
     # Must run before importing unsloth below: unsloth_zoo's own import chain
     # (via transformers.processing_utils.Unpack -> modeling_utils ->
     # quantizers.auto -> quantizer_torchao) is exactly what triggers

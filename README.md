@@ -157,6 +157,12 @@ Implementation notes, if you're reading the code:
   quantization). This is a second line of defense on top of, not a
   replacement for, Section 2's own torchaudio uninstall / torchao version
   floor — see Troubleshooting for the full incident history behind both.
+- `model.load_base_model()` sets `UNSLOTH_COMPILE_DISABLE=1` (Unsloth's own
+  documented flag) before importing Unsloth, disabling their
+  `torch.compile`/dynamo-based auto-compiler by default — a deliberate
+  stability-over-speed tradeoff given `gemma4_unified`'s custom-compiled
+  attention/RMSNorm modules are extremely new; see Troubleshooting's
+  `InternalTorchDynamoError` entry for the reproduced crash this avoids.
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -610,6 +616,45 @@ If you're on an older copy of this notebook pinning `5.5.0` (or resolving
 transformers as part of a single flat `pip install -r requirements.txt`),
 pull the latest version, then **Runtime -> Restart session**, then re-run
 from Section 1.
+
+**`InternalTorchDynamoError: AcceleratorError: CUDA error: an illegal
+memory access was encountered`** during Section 10 (Evaluate), deep inside
+`torch._dynamo`'s tracing of Unsloth's compiled
+`Gemma4UnifiedTextAttention`/`RMSNorm` forward
+(`unsloth_compiled_cache/unsloth_compiled_module_gemma4_unified.py`).
+Not a bug in this project's code — `evaluator.evaluate_validation()` is a
+one-line wrapper around `trainer.evaluate()`. Two confirmed, related facts
+about Unsloth's own bleeding-edge Gemma 4 support:
+1. `gemma4_unified` is an extremely recent addition to Unsloth (weeks old
+   at time of writing — see the entries above), and its custom-compiled
+   attention/RMSNorm modules go through `torch.compile`/dynamo tracing,
+   which is exactly where this crash surfaces.
+2. Gemma 4's architecture shares KV state across a subset of layers
+   (`num_kv_shared_layers`), and there is a separate, confirmed upstream bug
+   class where `use_cache=False` — which training with gradient
+   checkpointing forces — causes those KV-shared layers to recompute
+   incorrectly instead of reusing cached state; serious enough that Unsloth
+   shipped a full re-release over it rather than a patch.
+
+`model.load_base_model()` now sets `UNSLOTH_COMPILE_DISABLE=1` (Unsloth's
+own documented environment flag) before importing Unsloth, trading some
+speed for correctness/stability on this very new, actively-changing model
+family until Unsloth's compiled Gemma-4-12B path is better proven. If
+you're on an older copy of this repo without that line, `git pull`. If you
+still hit this crash even with compilation disabled: **once "illegal
+memory access" occurs, the CUDA context for the rest of that kernel process
+should be considered corrupted** — `Runtime -> Restart session` (not just
+re-running the cell) before retrying anything, since the error is
+asynchronously reported and the actual fault may have occurred earlier
+(e.g. during Section 9's training loop, only surfacing here). If it
+recurs after a genuine restart, this is an active upstream Unsloth
+correctness issue for this specific model, not something to chase further
+in this project's code — check
+[unslothai/unsloth discussions on Gemma 4](https://github.com/unslothai/unsloth/discussions/4800)
+for the current state, and consider setting `evaluation.run_eval: false`
+temporarily to let training/saving complete while waiting for an upstream
+fix (the adapter still saves in Section 11 regardless of whether Section 10
+ran).
 
 **`OutOfMemoryError: CUDA out of memory` during Section 9 (Train), even on
 A100 40GB.**
