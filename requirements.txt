@@ -17,17 +17,25 @@ transformers>=4.51.0
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 
-# peft and trl are ALSO floor-only, not exact-pinned, as a general defensive
-# practice: since transformers is left free to resolve much newer than this
-# project's floor, an exact-pinned old peft/trl release could in principle
-# predate an internal transformers API it depends on. (One real failure that
-# LOOKED like this — "Could not import module 'BloomPreTrainedModel'" while
-# importing peft — turned out to be unrelated: see the torch note below. Kept
-# floor-only regardless, since the underlying risk of peft/trl lagging a
-# much-newer transformers is still real even if it wasn't this incident's
-# cause.)
+# peft, trl, and accelerate are ALSO floor-only, not exact-pinned: since
+# transformers is left free to resolve much newer than this project's floor,
+# an exact-pinned old release of any package whose code calls into
+# transformers' Trainer/model internals can predate an API those internals
+# now use. Confirmed for accelerate specifically:
+#   TypeError: Accelerator.unwrap_model() got an unexpected keyword
+#   argument 'keep_torch_compile'
+# — transformers 5.12.1's Trainer._wrap_model() calls
+# `self.accelerator.unwrap_model(model, keep_torch_compile=False)`, a
+# parameter accelerate==1.2.1 (this project's original exact pin, from
+# months before that transformers release) doesn't have. (peft/trl were
+# floor-pinned for the same defensive reason; one early failure that LOOKED
+# like a peft/transformers version mismatch — "Could not import module
+# 'BloomPreTrainedModel'" — turned out to be unrelated, see the torch note
+# below, but the underlying risk of peft/trl/accelerate lagging a
+# much-newer transformers is real regardless.)
 peft>=0.14.0
 trl>=0.15.0
+accelerate>=1.2.0
 
 # torch is intentionally NOT pinned/listed here at all — this is the fix for
 # a confirmed, reproduced incident: pinning torch (even loosely) makes pip
@@ -52,7 +60,6 @@ trl>=0.15.0
 # per-architecture class exports or to torch's own CUDA build, so
 # exact-pinning them is safe.
 datasets==3.2.0
-accelerate==1.2.1
 bitsandbytes>=0.46.1
 sentencepiece==0.2.0
 PyYAML==6.0.2

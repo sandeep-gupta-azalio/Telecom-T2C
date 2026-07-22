@@ -293,6 +293,19 @@ torchaudio/torchvision expect. `requirements.txt` deliberately never lists
 `torch.version.cuda` up front so a future mismatch here is visible
 immediately.)
 
+**`TypeError: Accelerator.unwrap_model() got an unexpected keyword argument
+'keep_torch_compile'`** during Section 9 (Train), inside
+`transformers.Trainer._wrap_model()`.
+A genuine version-skew bug, not a Colab environment artifact this time:
+`transformers`' `Trainer` internals call
+`self.accelerator.unwrap_model(model, keep_torch_compile=False)`, and that
+`keep_torch_compile` parameter doesn't exist in older `accelerate` releases.
+Since `transformers` is intentionally left floor-only to support Gemma 4,
+`accelerate` needs to float with it too — it's now floor-only in
+`requirements.txt` (`accelerate>=1.2.0`) alongside `peft`/`trl`, for the same
+reason. Fix: re-run Section 2's pip-install cell, then
+**Runtime -> Restart session**, then re-run from Section 1.
+
 **Model fails to load with an unrecognized-architecture / `KeyError` /
 `ValueError` on `model_type`.**
 `google/gemma-4-12B-it` postdates this project's `transformers` floor pin.
