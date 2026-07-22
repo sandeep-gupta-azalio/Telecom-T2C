@@ -11,9 +11,12 @@ import pytest
 
 nn = pytest.importorskip("torch.nn", reason="torch not installed in this environment")
 
+from src.config import ExperimentConfig
 from src.model import (
     GPUProfile,
+    attach_lora_for_backend,
     detect_gpu_profile,
+    load_base_model_for_backend,
     resolve_attn_implementation,
     resolve_target_modules,
     resolve_torch_dtype,
@@ -90,3 +93,24 @@ class TestResolveTorchDtype:
         import torch
 
         assert resolve_torch_dtype("not-a-real-dtype") == torch.bfloat16
+
+
+class TestBackendDispatch:
+    """Unknown-backend error paths only — the real unsloth/transformers loading
+    paths need a GPU + network access and are out of scope here (see module
+    docstring)."""
+
+    def test_load_base_model_unknown_backend_raises(self):
+        config = ExperimentConfig()
+        config.model.backend = "not-a-real-backend"
+        with pytest.raises(ValueError, match="Unknown model.backend"):
+            load_base_model_for_backend(config, hf_token=None)
+
+    def test_attach_lora_unknown_backend_raises(self):
+        config = ExperimentConfig()
+        config.model.backend = "not-a-real-backend"
+        with pytest.raises(ValueError, match="Unknown model.backend"):
+            attach_lora_for_backend(config, model=object())
+
+    def test_default_backend_is_unsloth(self):
+        assert ExperimentConfig().model.backend == "unsloth"

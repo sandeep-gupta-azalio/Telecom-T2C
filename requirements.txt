@@ -37,6 +37,24 @@ peft>=0.14.0
 trl>=0.15.0
 accelerate>=1.2.0
 
+# unsloth is the default model.backend (see configs/experiment.yaml) —
+# custom kernels/patches for a curated set of architectures, confirmed to
+# include the Gemma 4 family (unsloth/gemma-4-12b-it exists on the Hub) as
+# of this project's authoring, typically cutting VRAM usage substantially
+# for QLoRA versus the plain transformers+bitsandbytes path. Deliberately
+# UNPINNED (not even floor-only) for the exact same reason transformers is
+# floor-only above: it needs to resolve a version that's actually compatible
+# with whatever transformers/peft/trl/torch/CUDA Colab has *today*, and
+# Unsloth's own installer explicitly recommends auto-detection
+# (`--torch-backend=auto`) over manual pinning for this reason. This backend
+# is NOT validated on real hardware by this project (no GPU available during
+# development) — start with a small data.max_train_samples smoke test before
+# a full run, same practice already established for the transformers
+# backend. If it hits its own environment/compatibility issues, set
+# model.backend: transformers in configs/experiment.yaml to fall back to the
+# proven-working path without needing to touch this file.
+unsloth
+
 # torch is intentionally NOT pinned/listed here at all — this is the fix for
 # a confirmed, reproduced incident: pinning torch (even loosely) makes pip
 # reinstall it in Colab with whatever CUDA-toolkit-tagged wheel satisfies the

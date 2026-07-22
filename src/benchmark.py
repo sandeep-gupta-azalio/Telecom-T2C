@@ -55,7 +55,9 @@ def run_benchmark(
     recomputed, since recomputing it would require the live SFTTrainer
     instance, which a standalone benchmark run doesn't have.
     """
-    inference_model, tokenizer = inference.load_model_for_inference(config.model, str(adapter_dir), hf_token)
+    inference_model, tokenizer = inference.load_model_for_inference_for_backend(
+        config, str(adapter_dir), hf_token
+    )
 
     golden_metrics: Optional[dict[str, Any]] = None
     num_golden = 0

@@ -88,6 +88,46 @@ message rather than failing when it's missing.
 
 ---
 
+## Model backend
+
+`model.backend` in `configs/experiment.yaml` selects how the base model and
+LoRA adapter are loaded:
+
+| Backend | Default? | What it is |
+|---|---|---|
+| `unsloth` | Yes | Custom kernels/patches for a curated set of architectures — confirmed to include the Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub) as of this project's authoring. Typically cuts VRAM usage substantially for QLoRA versus the plain path below. |
+| `transformers` | Fallback | The original, proven-working path (plain `transformers` + `bitsandbytes` + `peft`) that this whole project was built and debugged against. |
+
+**`unsloth` has not been validated on real hardware by this project** — there
+was no GPU available during development, so this path was written against
+Unsloth's documented API shape but never run end-to-end. Given how many
+rounds of environment-specific breakage this project already hit getting the
+*plain* stack working on Colab (see Troubleshooting below), treat the same
+practice as load-bearing here too: **start with a small
+`data.max_train_samples` smoke test** before a full run. If `unsloth` hits
+its own compatibility issue, set `model.backend: transformers` in
+`configs/experiment.yaml` and re-run from Section 3 (Configuration) — no
+code changes needed, the plain path is fully preserved, not deleted.
+
+Implementation notes, if you're reading the code:
+- `model.load_base_model_for_backend()` / `model.attach_lora_for_backend()`
+  dispatch on this field; `inference.load_model_for_inference_for_backend()`
+  does the same for post-training reload.
+- The `unsloth` backend returns a tokenizer from the model-loading call
+  (Unsloth configures both together) — the notebook's Section 7 reassigns
+  its `tokenizer` variable to that return value, so everything downstream
+  (training, generation) uses the Unsloth-matched tokenizer, not the one
+  loaded earlier in Section 4 for dataset statistics.
+- `unsloth`'s fresh-LoRA-init path uses `use_gradient_checkpointing="unsloth"`
+  (their own offloaded-checkpointing implementation) instead of
+  transformers' generic gradient checkpointing — `trainer.build_sft_config()`
+  knows not to also enable the latter on this backend, to avoid
+  double-configuring checkpointing.
+- Both backends still never call `merge_and_unload()` — the adapter stays
+  separate from the base model either way.
+
+---
+
 ## Installation
 
 ### Local (for running `pytest tests/` only — no GPU needed)
@@ -396,11 +436,16 @@ pytest tests/ -v
 
 Covers dataset-loader validation (`validate_json`/`validate_messages`/
 `validate_roles`, corrupted-line handling), config loading/validation
-(missing fields, resume-directory resolution), model-loading logic
-(`resolve_target_modules`, GPU profile table, attention-implementation
-resolution — not actual 4-bit weight downloads), trainer initialization
-(`build_sft_config` field mapping — no real `.train()` call), and inference
-(`build_prompt`, `generate()`'s greedy-decode-then-fallback logic against
-fake model/tokenizer stand-ins). Tests requiring an unavailable package
-(e.g. `trl` if not installed locally) or a GPU skip cleanly rather than
-failing.
+(missing fields, resume-directory resolution, unsloth/transformers backend
+validation), model-loading logic (`resolve_target_modules`, GPU profile
+table, attention-implementation resolution, backend-dispatch error paths —
+not actual 4-bit weight downloads for either backend), trainer
+initialization (`build_sft_config` field mapping, including the
+backend-aware gradient-checkpointing branch — no real `.train()` call), and
+inference (`build_prompt`, `generate()`'s greedy-decode-then-fallback logic
+against fake model/tokenizer stand-ins). Tests requiring an unavailable
+package (e.g. `trl` if not installed locally) or a GPU skip cleanly rather
+than failing. The `unsloth` backend's actual model loading is not covered by
+these tests — it needs a GPU and is unverified by this project (see "Model
+backend" above); the recommended validation is a small
+`data.max_train_samples` smoke test on Colab.

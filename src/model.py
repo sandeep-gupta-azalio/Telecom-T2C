@@ -1,15 +1,23 @@
 """Base model + LoRA adapter loading.
 
-Preserves the reference notebook's proven-working 4-bit QLoRA loading order
-(NF4 double-quant BitsAndBytesConfig -> AutoModelForCausalLM -> use_cache off
--> gradient_checkpointing_enable -> prepare_model_for_kbit_training) and its
-PEFT continue-training path (PeftModel.from_pretrained(..., is_trainable=True)).
+Two backends, selected via config.model.backend ("unsloth" | "transformers"):
 
-The reference notebook never actually builds a fresh peft.LoraConfig (it only
-ever continues existing adapters) — the fresh-init path here (attach_lora
-when continue_adapter is unset) is new, since this project's default run has
-no prior adapter to continue from. Neither path ever calls
-merge_and_unload() — adapters are never merged into the base model.
+- "unsloth" (default): loads via Unsloth's FastModel, which provides custom
+  kernels/patches for a curated set of architectures — confirmed to include
+  Gemma 4 (unsloth/gemma-4-12b-it exists on the Hub) as of this project's
+  development — typically cutting VRAM usage substantially versus plain
+  transformers+bitsandbytes for QLoRA. NOT validated on real hardware by
+  this project (no GPU available during development); start with a small
+  data.max_train_samples smoke test before a full run.
+- "transformers": the original, proven-working path — preserves the
+  reference notebook's 4-bit QLoRA loading order (NF4 double-quant
+  BitsAndBytesConfig -> AutoModelForCausalLM -> use_cache off ->
+  prepare_model_for_kbit_training) and its PEFT continue-training path
+  (PeftModel.from_pretrained(..., is_trainable=True)). Kept as a documented
+  fallback in case "unsloth" hits its own environment/compatibility issues.
+
+Neither backend, on either the fresh-init or continue-adapter path, ever
+calls merge_and_unload() — adapters are never merged into the base model.
 """
 
 from __future__ import annotations
@@ -294,12 +302,132 @@ def attach_lora(model: Any, lora_config: LoraConfigSection, continue_adapter: Op
     return peft_model
 
 
-def load_model_with_adapter(config: ExperimentConfig, hf_token: Optional[str]) -> Any:
-    """Compose load_base_model + attach_lora for callers that want both steps at once.
+def load_base_model_unsloth(
+    model_config: ModelConfig, max_seq_length: int, hf_token: Optional[str] = None
+) -> tuple[Any, Any]:
+    """Load the base model + tokenizer together via Unsloth's FastModel.
 
-    The notebook keeps "Load Model" and "Load Adapter" as separate cells, so
-    both the composed function and the two individual steps remain available.
+    Returns (model, tokenizer) — unlike load_base_model(), the tokenizer
+    comes back from this call because FastModel.from_pretrained configures
+    model and tokenizer together (chat template, padding, special tokens).
+    Callers MUST use this returned tokenizer for training/inference from
+    this point forward, not a separately-loaded one (see notebook Section 7,
+    which reassigns its `tokenizer` variable to this return value).
+    """
+    try:
+        from unsloth import FastModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "model.backend='unsloth' but the unsloth package is not installed or failed to "
+            "import. Re-run the notebook's Install section (requirements.txt includes it), or "
+            "set model.backend='transformers' in configs/experiment.yaml to use the plain "
+            "transformers+peft path instead."
+        ) from exc
+
+    logger.info("Loading base model %s via Unsloth FastModel (4-bit QLoRA)...", model_config.base_model)
+    try:
+        model, tokenizer = FastModel.from_pretrained(
+            model_name=model_config.base_model,
+            max_seq_length=max_seq_length,
+            load_in_4bit=True,
+            token=hf_token,
+            dtype=None,  # let Unsloth pick the right compute dtype for the detected GPU
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unsloth FastModel.from_pretrained({model_config.base_model!r}) failed: {exc}. "
+            "If unsloth doesn't (yet) support this exact model/architecture, set "
+            "model.backend='transformers' in configs/experiment.yaml to fall back to the "
+            "plain transformers+peft path."
+        ) from exc
+
+    logger.info("Model + tokenizer loaded via Unsloth.")
+    return model, tokenizer
+
+
+def attach_lora_unsloth(model: Any, lora_config: LoraConfigSection, continue_adapter: Optional[str]) -> Any:
+    """Attach a LoRA adapter via Unsloth: continue an existing one, or initialize fresh.
+
+    Fresh init uses FastModel.get_peft_model with use_gradient_checkpointing=
+    "unsloth" — Unsloth's own offloaded-checkpointing implementation, their
+    signature memory-saving feature. trainer.py's build_sft_config knows not
+    to also enable transformers' own gradient_checkpointing on the SFTConfig
+    side when this backend is active, to avoid double-configuring it.
+    Continuing a prior adapter reuses plain peft.PeftModel.from_pretrained,
+    which Unsloth documents as compatible with its patched base models.
+    Never calls merge_and_unload() on either path.
+
+    target_modules: when lora.lora_target_modules is unset, this intentionally
+    does NOT call resolve_target_modules() (that function's generic nn.Linear
+    detection targets plain transformers models) — Unsloth's own defaults for
+    its patched architecture are used instead by passing target_modules=None.
+    """
+    from peft import PeftModel
+
+    if continue_adapter:
+        logger.info("Continuing training from prior adapter (Unsloth base model): %s", continue_adapter)
+        peft_model = PeftModel.from_pretrained(model, continue_adapter, is_trainable=True)
+    else:
+        from unsloth import FastModel
+
+        logger.info("No continue_adapter set — initializing a fresh LoRA adapter via Unsloth.")
+        target_modules = list(lora_config.lora_target_modules) if lora_config.lora_target_modules else None
+        logger.info(
+            "LoRA target_modules: %s",
+            target_modules if target_modules else "unsloth defaults for this architecture",
+        )
+        peft_model = FastModel.get_peft_model(
+            model,
+            r=lora_config.lora_r,
+            lora_alpha=lora_config.lora_alpha,
+            lora_dropout=lora_config.lora_dropout,
+            target_modules=target_modules,
+            bias=lora_config.lora_bias,
+            use_gradient_checkpointing="unsloth",
+        )
+
+    peft_model.print_trainable_parameters()
+    return peft_model
+
+
+def load_base_model_for_backend(
+    config: ExperimentConfig, hf_token: Optional[str]
+) -> tuple[Any, Optional[Any]]:
+    """Load the base model using config.model.backend. Returns (model, tokenizer_or_None).
+
+    tokenizer is only non-None for the "unsloth" backend — callers on the
+    "transformers" backend keep using the tokenizer they already loaded via
+    tokenizer.load_tokenizer().
     """
     configure_cuda_visible_devices(config.hardware.training_gpu)
-    base_model = load_base_model(config.model, hf_token, device_index=config.hardware.training_gpu)
-    return attach_lora(base_model, config.lora, config.model.continue_adapter)
+    backend = config.model.backend
+    if backend == "unsloth":
+        return load_base_model_unsloth(config.model, config.data.max_seq_length, hf_token)
+    if backend == "transformers":
+        model = load_base_model(config.model, hf_token, device_index=config.hardware.training_gpu)
+        return model, None
+    raise ValueError(f"Unknown model.backend: {backend!r}. Expected 'unsloth' or 'transformers'.")
+
+
+def attach_lora_for_backend(config: ExperimentConfig, model: Any) -> Any:
+    """Attach a LoRA adapter using config.model.backend."""
+    backend = config.model.backend
+    if backend == "unsloth":
+        return attach_lora_unsloth(model, config.lora, config.model.continue_adapter)
+    if backend == "transformers":
+        return attach_lora(model, config.lora, config.model.continue_adapter)
+    raise ValueError(f"Unknown model.backend: {backend!r}. Expected 'unsloth' or 'transformers'.")
+
+
+def load_model_with_adapter(config: ExperimentConfig, hf_token: Optional[str]) -> tuple[Any, Optional[Any]]:
+    """Compose load_base_model_for_backend + attach_lora_for_backend for callers that want
+    both steps at once. Returns (peft_model, tokenizer_or_None) — see
+    load_base_model_for_backend for the tokenizer contract.
+
+    The notebook keeps "Load Model" and "Load Adapter" as separate cells, so
+    both this composed function and the two individual dispatchers remain
+    available.
+    """
+    base_model, tokenizer = load_base_model_for_backend(config, hf_token)
+    peft_model = attach_lora_for_backend(config, base_model)
+    return peft_model, tokenizer
