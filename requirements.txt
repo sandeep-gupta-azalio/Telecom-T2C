@@ -13,7 +13,28 @@
 # check with an actionable error message ("pip install -U transformers") as
 # the real safety net here, not this pin. At install time, prefer the newest
 # available release of these three packages.
-transformers>=4.51.0
+#
+# transformers ALSO carries an explicit upper bound, <4.55.0 — an
+# unfortunately real, unresolved tension with the floor-only reasoning
+# above, not a clean fix: peft currently has ZERO working PyPI release for
+# transformers>=4.55 (confirmed —
+# https://github.com/huggingface/peft/issues/2754, "No working peft version
+# available in PyPI for transformers 4.55+"; reproduced here too, with the
+# latest available peft 0.19.1: `ImportError: cannot import name
+# 'BloomPreTrainedModel' from 'transformers'` at `import peft`, which is
+# unconditional and happens before any peft feature is actually used).
+# BOTH model.backend options transitively need `import peft` to succeed
+# (unsloth builds its LoRA support on peft too), so this isn't a
+# per-backend problem — without this cap, neither backend gets past
+# `import peft`. If Gemma 4 itself turns out to need transformers>=4.55,
+# Section 7 (Load Model) will fail with an unrecognized-architecture error
+# despite Section 2 succeeding — that would mean this cap is currently
+# incompatible with Gemma 4 support, and there is no clean resolution until
+# peft ships a fix; raising/removing this upper bound then just trades one
+# broken import for the other. Revisit this cap periodically — remove it
+# once peft's own PyPI metadata (not just this file) declares real support
+# for newer transformers, rather than waiting on this comment to go stale.
+transformers>=4.51.0,<4.55.0
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 

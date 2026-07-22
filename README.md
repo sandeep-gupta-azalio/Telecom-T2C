@@ -98,6 +98,12 @@ LoRA adapter are loaded:
 | `unsloth` | Yes | Custom kernels/patches for a curated set of architectures — confirmed to include the Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub). Typically cuts VRAM usage substantially for QLoRA versus the plain path below. |
 | `transformers` | Fallback | The original, proven-working path (plain `transformers` + `bitsandbytes` + `peft`) that this whole project was built and debugged against. |
 
+Both options load-bear on `peft` (Unsloth builds its LoRA support on peft
+too), so a `peft`/`transformers` incompatibility blocks either choice
+equally — see the `ImportError: cannot import name 'BloomPreTrainedModel'`
+entry in Troubleshooting for a real, currently-unresolved case of exactly
+that, and why `requirements.txt` caps `transformers<4.55.0` because of it.
+
 **`unsloth` hit a real failure on one Colab image**, and it's worth
 understanding exactly what kind before trusting it again: `from unsloth
 import FastModel` raised `NameError: name 'auto_docstring' is not defined`
@@ -394,10 +400,43 @@ reason. Fix: re-run Section 2's pip-install cell, then
 **Model fails to load with an unrecognized-architecture / `KeyError` /
 `ValueError` on `model_type`.**
 `google/gemma-4-12B-it` postdates this project's `transformers` floor pin.
-Upgrade: `pip install -U transformers tokenizers huggingface_hub`, then
-re-run Section 2 (Install) and Section 7 (Load Model). `model.py`'s
+Normally the fix would be "just upgrade transformers" — **but read the next
+entry first**, because `requirements.txt` currently caps `transformers` at
+`<4.55.0` for an unrelated, currently-unresolved reason (a `peft` bug), and
+blindly upgrading past that cap reintroduces a *different* failure. `model.py`'s
 `load_base_model()` also attempts an `AutoModelForImageTextToText` fallback
-automatically before raising.
+automatically before raising either way.
+
+**`ImportError: cannot import name 'BloomPreTrainedModel' from
+'transformers'`** at `import peft` (in Section 2's version-check cell, or
+anywhere else `peft` gets imported).
+This is a real, currently-unresolved upstream incompatibility, not something
+this project's code can route around: **`peft` has zero working PyPI
+release for `transformers>=4.55`** — confirmed via
+[huggingface/peft#2754](https://github.com/huggingface/peft/issues/2754)
+("No working peft version available in PyPI for transformers 4.55+"),
+reproduced here with the latest available `peft` (0.19.1) against
+`transformers` 4.57.2. The failure is unconditional — it happens the instant
+`import peft` runs, before any peft feature is actually used — so it blocks
+**both** `model.backend` options equally (Unsloth's LoRA support is built on
+peft too). `requirements.txt` now pins `transformers>=4.51.0,<4.55.0` as the
+only available workaround.
+
+**This trades one problem for a real, unresolved risk**, and it's worth
+being honest about rather than pretending it's clean: nothing confirms
+Gemma 4 actually works below `transformers` 4.55 — the model card's only
+guidance is "upgrade to latest," which if anything suggests it wants
+something *newer*. If Section 2 now succeeds but Section 7 (Load Model)
+fails with an unrecognized-architecture error, that means Gemma 4 genuinely
+needs `transformers>=4.55`, and there is currently no transformers version
+that satisfies both Gemma 4 and a working `peft` at the same time — that's
+not a bug in this project to fix, it's a real gap between two upstream
+projects' release cadences. The only paths forward at that point: wait for
+`peft` to ship a fix for `transformers>=4.55` (check the issue above), or
+patch around the broken import yourself. Don't try to "fix" it by just
+raising the cap without confirming `peft`'s status has actually changed —
+that silently reintroduces the `import peft` failure this cap exists to
+avoid.
 
 **`NameError: name 'auto_docstring' is not defined`** (or any other
 non-`ImportError` exception) **while loading `model.backend: unsloth`.**
