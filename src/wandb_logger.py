@@ -31,8 +31,16 @@ class WandbLogger:
     def enabled(self) -> bool:
         return self._enabled
 
-    def init(self) -> bool:
-        """Attempt to start a wandb run. Never raises — sets enabled=False and warns on failure."""
+    def init(self, job_type: str = "train") -> bool:
+        """Attempt to start a wandb run. Never raises — sets enabled=False and warns on failure.
+
+        Login follows the pattern wandb/Colab recommend for notebooks —
+        fetch WANDB_API_KEY (env var, or a Colab secret via
+        google.colab.userdata) and call wandb.login(key=...) explicitly,
+        rather than relying on wandb.init() to discover credentials
+        implicitly. See:
+        https://colab.research.google.com/github/wandb/examples/blob/master/colabs/intro/Intro_to_Weights_%26_Biases.ipynb
+        """
         mode = self.wandb_config.wandb_mode
         if mode == "disabled":
             logger.info("wandb.wandb_mode=disabled — wandb logging is off.")
@@ -52,15 +60,19 @@ class WandbLogger:
                 from google.colab import userdata  # type: ignore[import-not-found]
 
                 api_key = userdata.get("WANDB_API_KEY")
-                if api_key:
-                    os.environ["WANDB_API_KEY"] = api_key
             except Exception:
-                pass
+                api_key = None
 
         effective_mode = mode
-        if not api_key and mode == "online":
+        if api_key:
+            try:
+                wandb.login(key=api_key)
+            except Exception as exc:
+                logger.warning("wandb.login() failed (%s) — falling back to wandb_mode='offline'.", exc)
+                effective_mode = "offline"
+        elif mode == "online":
             logger.warning(
-                "No WANDB_API_KEY found in environment or Colab secrets — falling back to "
+                "No WANDB_API_KEY found (checked environment and Colab secrets) — falling back to "
                 "wandb_mode='offline' (metrics logged locally, not synced)."
             )
             effective_mode = "offline"
@@ -70,7 +82,10 @@ class WandbLogger:
                 project=self.wandb_config.wandb_project,
                 entity=self.wandb_config.wandb_entity,
                 name=self.run_metadata.get("experiment_name"),
+                job_type=job_type,
                 mode=effective_mode,
+                # Hyperparameters + provenance together, so runs are comparable
+                # in the wandb UI (the wandb-recommended use of config=).
                 config=self.run_metadata,
             )
             self._enabled = True
@@ -120,6 +135,24 @@ class WandbLogger:
             },
             step=step,
         )
+
+    def set_summary(self, metrics: dict[str, Any]) -> None:
+        """Set final headline metrics (e.g. final eval loss, golden exact-match rate).
+
+        Distinct from log_metrics: summary values are the run's at-a-glance
+        stats in the wandb UI (used to compare across runs), not a time
+        series — the reference notebook's `wandb.summary['test_accuracy'] = ...`
+        pattern.
+        """
+        if not self._enabled:
+            return
+        try:
+            import wandb
+
+            for key, value in metrics.items():
+                wandb.summary[key] = value
+        except Exception as exc:
+            logger.warning("Failed to set wandb summary: %s", exc)
 
     def upload_artifact(self, path: Path, artifact_type: str, name: str) -> None:
         """Upload a file or directory as a wandb Artifact.

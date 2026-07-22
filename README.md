@@ -190,18 +190,47 @@ ideally a `manifest.json`) needs to already exist at the path you put in
 
 Set `wandb.wandb_project` (and optionally `wandb.wandb_entity`) in the
 config. Provide your API key via Colab **Secrets** as `WANDB_API_KEY` (or
-set the `WANDB_API_KEY` environment variable directly). If no key is found,
-`WandbLogger` automatically falls back to `wandb_mode="offline"` rather than
-blocking; if the `wandb` package itself isn't installed or `wandb.init()`
-fails for any reason, every other module keeps working — `WandbLogger` is
-the single no-op-safe gateway all logging goes through, so a wandb outage
-never aborts a training run.
+set the `WANDB_API_KEY` environment variable directly, e.g. outside Colab).
+`WandbLogger.init()` follows the login pattern wandb/Colab recommend for
+notebooks — fetch the key and call `wandb.login(key=...)` explicitly, rather
+than relying on `wandb.init()` to discover credentials implicitly:
 
-Logged: train/eval loss, learning rate, grad norm, GPU utilization/memory,
-examples/sec, tokens/sec, ETA, epoch, step, and run metadata (dataset
-version, LoRA version, generator/validator version, git hash). Uploaded as
-artifacts at the end of a run: manifest, adapter, predictions, metrics,
-config.
+```python
+import wandb
+from google.colab import userdata
+
+wandb_key = userdata.get("WANDB_API_KEY")
+wandb.login(key=wandb_key)
+```
+
+(see [wandb's Intro to Weights & Biases Colab](https://colab.research.google.com/github/wandb/examples/blob/master/colabs/intro/Intro_to_Weights_%26_Biases.ipynb)
+for the reference this follows — also the source for the `config=`,
+`job_type=`, and `wandb.summary[...]` conventions below). If no key is
+found, `WandbLogger` automatically falls back to `wandb_mode="offline"`
+rather than blocking; if the `wandb` package itself isn't installed or
+`wandb.init()`/`wandb.login()` fails for any reason, every other module
+keeps working — `WandbLogger` is the single no-op-safe gateway all logging
+goes through, so a wandb outage never aborts a training run.
+
+**Config** (`wandb.init(config=...)`): the full set of hyperparameters
+(learning rate, batch size, LoRA rank/alpha, packing, max_seq_length, base
+model, backend) plus provenance (dataset/LoRA/generator/validator version,
+git hash) — built in the notebook's Section 9, so every run is comparable
+side-by-side in the wandb UI, not just tagged with metadata.
+
+**During training** (via `TrainingCallback`/`EvaluationCallback`/`GPUCallback`):
+train/eval loss, learning rate, grad norm, GPU utilization/memory,
+examples/sec, tokens/sec, ETA, epoch, step — logged as a time series with
+namespaced keys (`train/...`, `eval/...`, `gpu/...`, `system/...`).
+
+**Final summary** (`wandb.summary[...]`, via `WandbLogger.set_summary()`):
+final validation metrics and golden exact-match rate, set once at the end of
+Section 10 (Evaluate) — these are what shows up as the run's headline stats
+when comparing runs in the wandb UI, distinct from the time-series logs
+above.
+
+**Artifacts**, uploaded at the end of a run (Section 11): manifest, adapter,
+predictions, metrics, config.
 
 ---
 
