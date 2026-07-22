@@ -132,6 +132,13 @@ Implementation notes, if you're reading the code:
   `trainer.build_sft_config()` always disables transformers' own
   gradient_checkpointing at the `SFTConfig` level, since this is the only
   place checkpointing gets configured; enabling both would conflict.
+- `utils.disable_unused_transformers_backends()` is called before any
+  transformers/unsloth import in `tokenizer.load_tokenizer()` and
+  `model.load_base_model()` (and once more, as early as possible, at the end
+  of the notebook's Install cell) — it permanently neutralizes two confirmed,
+  recurring import-time crashes unrelated to anything this project actually
+  uses (broken `torchaudio`/`torchao` installs on some Colab images; see
+  Troubleshooting for the full history).
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -390,45 +397,67 @@ torchaudio/torchvision expect. `requirements.txt` deliberately never lists
 `torch.version.cuda` up front so a future mismatch here is visible
 immediately.)
 
-**`unsloth`/`unsloth_zoo`: FAILED to import, with `AttributeError:
+**`unsloth`/`unsloth_zoo`: FAILED to import** (or, in a different session,
+**`ModuleNotFoundError: Could not import module 'AutoProcessor'`** while
+loading the tokenizer in Section 4) **with `AttributeError:
 '_OpNamespace' '_c10d_functional' object has no attribute
-'_wrap_tensor_autograd'`** deep in a traceback through
-`torchao/dtypes/nf4tensor.py`.
+'_wrap_tensor_autograd'`, or `ModuleNotFoundError: No module named
+'torchao'`,** deep in a traceback through `torchao/dtypes/nf4tensor.py` or
+`transformers/quantizers/quantizer_torchao.py`.
 The exact same bug class as the `torchaudio` entry above, this time via
-`torchao`: `unsloth_zoo` imports `transformers.processing_utils.Unpack`,
-which transitively imports `transformers/modeling_utils.py`, which
-unconditionally imports `transformers/quantizers/auto.py` (needed for
-`AutoHfQuantizer`, regardless of which quantization backend you actually
-use — this project only ever uses bitsandbytes 4-bit, never TorchAO).
-`quantizers/auto.py` unconditionally imports `quantizer_torchao.py`, which
-itself only imports `torchao.prototype.safetensors.safetensors_support`
-when `is_torchao_available()` is `True` — but, same as the `torchaudio`
-case, that check only confirms `torchao` is *present*, not that importing
-it actually works. That submodule transitively imports
-`torchao/dtypes/nf4tensor.py`, which references a specific
-`torch.ops._c10d_functional._wrap_tensor_autograd` op at module import
-time — and on a Colab image where the installed `torchao` build expects a
-different torch op signature than the installed torch build actually
-registers, that reference raises `AttributeError` (not `ImportError`),
-uncaught, taking down the entire `unsloth`/`unsloth_zoo` import chain.
-This project never uses `torchao` — Section 2 (Install) now runs
-`pip uninstall -y torchaudio torchao` **after** installing
-`requirements.txt`, not before. Order matters here: `unsloth_zoo`'s own
-`pyproject.toml` unconditionally declares `torchao>=0.13.0` as a base
-dependency (confirmed by reading it directly on GitHub) — so an earlier
-version of this notebook that uninstalled torchao *before* running
-`pip install --upgrade -r requirements.txt` just got it silently
-reinstalled by that very next step, via `unsloth_zoo`. Uninstalling
-afterward makes `is_torchao_available()` correctly return `False` for the
-rest of the session, regardless of what pulled torchao back in during
-install. If you're on an older copy of this notebook where the uninstall
-runs before the install (or only covers `torchaudio`), pull the latest
-version, or run it manually right now:
+`torchao`: any `Auto*` class (`AutoProcessor`, `AutoTokenizer`,
+`AutoModelForCausalLM`, ...) transitively imports
+`transformers/modeling_utils.py`, which unconditionally imports
+`transformers/quantizers/auto.py` (needed for `AutoHfQuantizer`, regardless
+of which quantization backend you actually use — this project only ever
+uses bitsandbytes 4-bit, never TorchAO). `quantizers/auto.py`
+unconditionally imports `quantizer_torchao.py`, which itself only imports
+`torchao.prototype.safetensors.safetensors_support` when
+`is_torchao_available()` is `True` — but, same as the `torchaudio` case,
+that check only confirms `torchao` is *present*, not that importing it
+actually works.
+
+Two distinct symptoms have both been confirmed from this same root cause:
+- **`torchao` present but broken**: the guarded import transitively pulls in
+  `torchao/dtypes/nf4tensor.py`, which references a specific
+  `torch.ops._c10d_functional._wrap_tensor_autograd` op at module import
+  time — on a Colab image where the installed `torchao` build expects a
+  different torch op signature than the installed torch build actually
+  registers, that reference raises `AttributeError`, uncaught.
+- **`torchao` absent, but `is_torchao_available()` still returns `True`**:
+  that check is `@lru_cache`d, so if it was ever called even once earlier in
+  the *same kernel process* — before an uninstall took effect, or across
+  cells without an intervening restart — the cached `True` result never
+  re-checks reality again for the rest of that process. A later uninstall
+  (even a correctly-ordered one) can leave it stuck, and the guarded import
+  then fails with a plain `ModuleNotFoundError: No module named 'torchao'`
+  instead.
+
+This project never uses `torchao`, so **the durable fix doesn't rely on
+`torchao` actually being absent at all**: `utils.disable_unused_transformers_backends()`
+directly monkeypatches `is_torchaudio_available`/`is_torchao_available` in
+`transformers.utils` to unconditionally return `False`, sidestepping both
+the "present but broken" and "stale cache" failure modes at once — see its
+docstring in `src/utils.py` for the full reasoning. It's called as early as
+possible: at the end of Section 2's Install cell (before Section 2's own
+diagnostic `import unsloth` below it), and defensively again at the top of
+`tokenizer.load_tokenizer()` and `model.load_base_model()` in case either is
+ever called without Section 2 having run first in that kernel. Section 2
+also still runs `pip uninstall -y -q torchaudio torchao` **after** installing
+`requirements.txt` (not before — `unsloth_zoo`'s own `pyproject.toml`
+unconditionally declares `torchao>=0.13.0` as a base dependency, confirmed
+by reading it directly on GitHub, so an uninstall *before* the install just
+gets silently reinstalled by that very next step) as a secondary, disk-space
+line of defense, but the monkeypatch above is what actually makes this
+robust regardless of ordering or process staleness. If you're on an older
+copy of this notebook without the monkeypatch call, pull the latest version,
+or run it manually right now:
 ```python
-import subprocess, sys
-subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchao"])
+from src import utils
+utils.disable_unused_transformers_backends()
 ```
-then **Runtime -> Restart session**, then re-run from Section 1.
+then continue from wherever you were — no restart needed for this specific
+fix, since it takes effect immediately in the current process.
 
 **`TypeError: Accelerator.unwrap_model() got an unexpected keyword argument
 'keep_torch_compile'`** during Section 9 (Train), inside
@@ -614,11 +643,16 @@ unconditionally `False` regardless of `training.gradient_checkpointing`,
 since Unsloth's `FastModel.get_peft_model(use_gradient_checkpointing=...)`
 owns that setting instead — no real `.train()` call), inference
 (`build_prompt`, `generate()`'s greedy-decode-then-fallback logic against
-fake model/tokenizer stand-ins), and the tokenizer v4/v5
-`extra_special_tokens` compat shim (`patch_extra_special_tokens_list_format`
-against fake buggy/fixed method stand-ins — the exact real-world
-`AttributeError` this guards against is covered by the shim's own logic
-tests, not by loading real Gemma 4 weights). Tests requiring an unavailable
+fake model/tokenizer stand-ins), the tokenizer v4/v5 `extra_special_tokens`
+compat shim (`patch_extra_special_tokens_list_format` against fake
+buggy/fixed method stand-ins — the exact real-world `AttributeError` this
+guards against is covered by the shim's own logic tests, not by loading
+real Gemma 4 weights), and `utils.disable_unused_transformers_backends()`
+(asserts it forces the real, installed transformers'
+`is_torchaudio_available`/`is_torchao_available` to return `False`
+regardless of actual package presence, is idempotent, and tolerates the
+extra positional/keyword args `quantizer_torchao.py` actually calls it
+with — see "Model backend" above for why this patch exists). Tests requiring an unavailable
 package (e.g. `trl`/`torch` if not installed locally) skip cleanly rather
 than failing. Unsloth's actual model loading (`model.load_base_model`,
 `model.attach_lora`) is not covered by these tests — it needs a GPU and is

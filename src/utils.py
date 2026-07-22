@@ -285,3 +285,46 @@ def human_bytes(n: int) -> str:
 def timestamp_run_id() -> str:
     """Return a sortable run-id timestamp string: YYYYMMDD_HHMMSS."""
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def disable_unused_transformers_backends() -> None:
+    """Force transformers' is_torchaudio_available()/is_torchao_available() to
+    always return False, regardless of actual package presence.
+
+    This project is text-only (never touches torchaudio) and always uses
+    bitsandbytes 4-bit QLoRA via Unsloth (never TorchAO quantization) — so
+    transformers never legitimately needs either package. Both have caused
+    confirmed import failures on Colab images where the installed build is
+    present-but-broken relative to the installed torch build (a circular
+    import inside torchaudio's own CUDA-version check; a torch op signature
+    mismatch inside torchao/dtypes/nf4tensor.py) — and both availability
+    checks only confirm the package is *present*, not that importing it
+    actually succeeds, so a broken install crashes unrelated code paths
+    (nearly any Auto* class transitively imports transformers/modeling_utils.py,
+    which unconditionally imports both quantizer modules).
+
+    pip-uninstalling both (see the notebook's Install section) is a first
+    line of defense but isn't reliable alone: both checks are `@lru_cache`d,
+    so if either gets called even once earlier in the same kernel process —
+    before a later uninstall takes effect, or across cells without an
+    intervening restart — the cached result never re-checks reality again
+    for the rest of that process; a subsequent uninstall can leave the flag
+    stuck at a stale True. Patching the check itself, called as early as
+    possible (right after Install, before anything else touches
+    transformers), sidesteps both the "present but broken" and "stale cache"
+    failure modes at once, and is safe precisely because this project never
+    needs either package for anything. No-ops silently if transformers isn't
+    installed yet; safe to call multiple times.
+    """
+    try:
+        import transformers.utils as _t_utils
+        import transformers.utils.import_utils as _t_import_utils
+    except Exception:
+        return
+
+    def _always_false(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    for name in ("is_torchaudio_available", "is_torchao_available"):
+        setattr(_t_import_utils, name, _always_false)
+        setattr(_t_utils, name, _always_false)

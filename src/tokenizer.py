@@ -39,6 +39,8 @@ def patch_extra_special_tokens_list_format() -> None:
     touched — the original method is always tried first and used as-is
     whenever it doesn't raise. Idempotent — safe to call multiple times.
     """
+    utils.disable_unused_transformers_backends()
+
     try:
         from transformers.tokenization_utils_base import PreTrainedTokenizerBase
     except ImportError:
@@ -98,6 +100,12 @@ def load_tokenizer(model_id: str, hf_token: Optional[str] = None) -> Any:
     Sets pad_token=eos_token if unset and padding_side="right", matching the
     notebook exactly.
     """
+    # Must run before the transformers import below: AutoProcessor's lazy
+    # submodule load is exactly what triggers transformers.quantizers.auto's
+    # broken torchao import chain (see disable_unused_transformers_backends'
+    # docstring) — patching after importing AutoProcessor would be too late.
+    utils.disable_unused_transformers_backends()
+
     from transformers import AutoProcessor, AutoTokenizer
 
     patch_extra_special_tokens_list_format()

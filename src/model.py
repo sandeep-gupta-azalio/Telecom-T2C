@@ -107,6 +107,14 @@ def load_base_model(
     this point forward, not a separately-loaded one (see notebook Section 7,
     which reassigns its `tokenizer` variable to this return value).
     """
+    # Must run before importing unsloth below: unsloth_zoo's own import chain
+    # (via transformers.processing_utils.Unpack -> modeling_utils ->
+    # quantizers.auto -> quantizer_torchao) is exactly what triggers
+    # transformers' broken torchao availability check (see
+    # utils.disable_unused_transformers_backends' docstring) — patching after
+    # importing unsloth would be too late.
+    utils.disable_unused_transformers_backends()
+
     try:
         from unsloth import FastModel
     except Exception as exc:
