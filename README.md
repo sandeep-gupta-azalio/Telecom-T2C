@@ -390,6 +390,39 @@ torchaudio/torchvision expect. `requirements.txt` deliberately never lists
 `torch.version.cuda` up front so a future mismatch here is visible
 immediately.)
 
+**`unsloth`/`unsloth_zoo`: FAILED to import, with `AttributeError:
+'_OpNamespace' '_c10d_functional' object has no attribute
+'_wrap_tensor_autograd'`** deep in a traceback through
+`torchao/dtypes/nf4tensor.py`.
+The exact same bug class as the `torchaudio` entry above, this time via
+`torchao`: `unsloth_zoo` imports `transformers.processing_utils.Unpack`,
+which transitively imports `transformers/modeling_utils.py`, which
+unconditionally imports `transformers/quantizers/auto.py` (needed for
+`AutoHfQuantizer`, regardless of which quantization backend you actually
+use — this project only ever uses bitsandbytes 4-bit, never TorchAO).
+`quantizers/auto.py` unconditionally imports `quantizer_torchao.py`, which
+itself only imports `torchao.prototype.safetensors.safetensors_support`
+when `is_torchao_available()` is `True` — but, same as the `torchaudio`
+case, that check only confirms `torchao` is *present*, not that importing
+it actually works. That submodule transitively imports
+`torchao/dtypes/nf4tensor.py`, which references a specific
+`torch.ops._c10d_functional._wrap_tensor_autograd` op at module import
+time — and on a Colab image where the installed `torchao` build expects a
+different torch op signature than the installed torch build actually
+registers, that reference raises `AttributeError` (not `ImportError`),
+uncaught, taking down the entire `unsloth`/`unsloth_zoo` import chain.
+This project never uses `torchao` — Section 2 (Install) now runs
+`pip uninstall -y torchaudio torchao` before installing `requirements.txt`
+(both in the same call, since they're the same bug class), which makes
+`is_torchao_available()` correctly return `False` and skip that code path
+entirely. If you're on an older copy of this notebook that only uninstalls
+`torchaudio`, pull the latest version, or run it manually:
+```python
+import subprocess, sys
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchao"])
+```
+then **Runtime -> Restart session**, then re-run from Section 1.
+
 **`TypeError: Accelerator.unwrap_model() got an unexpected keyword argument
 'keep_torch_compile'`** during Section 9 (Train), inside
 `transformers.Trainer._wrap_model()`.
