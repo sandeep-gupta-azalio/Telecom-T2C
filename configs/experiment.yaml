@@ -27,7 +27,7 @@ data:
   val_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/val_sft_batched.jsonl
   golden_path: null                          # optional golden eval JSONL; skipped gracefully if unset/missing
   eval_source: val                           # "val" | "golden" — which split feeds loss-based eval during training
-  max_train_samples: 50                    # cap on training rows (seeded random sample); null = full dataset
+  max_train_samples: null                    # cap on training rows (seeded random sample); null = full dataset
   max_eval_samples: 256                      # cap on eval rows
   max_seq_length: 1536                       # token cap; feeds SFTConfig.max_length and packing
 
@@ -60,10 +60,19 @@ training:
   learning_rate: 0.0001                      # NOTE: carried over from the reference notebook's
                                               # continue-training default; consider 2e-4 for fresh init
                                               # (this run) — see README "Troubleshooting".
-  batch_size: 4                              # per_device_train_batch_size
-  eval_batch_size: 4                         # per_device_eval_batch_size
-  gradient_accumulation: 4                   # effective batch size = batch_size * gradient_accumulation
-  packing: true                              # TRL sequence packing
+  batch_size: 1                              # per_device_train_batch_size — lowered from 4: 4/4 OOM'd on
+                                              # A100 40GB with a 12B model at max_seq_length=1536 (confirmed
+                                              # in practice, not a config file bug — see README OOM entry)
+  eval_batch_size: 1                         # per_device_eval_batch_size — same OOM reasoning as batch_size
+  gradient_accumulation: 16                  # effective batch size = batch_size * gradient_accumulation
+                                              # (kept at 16, same as the original 4*4, by raising this to
+                                              # offset the lower batch_size)
+  packing: false                             # TRL sequence packing — off: with packing, every sequence is
+                                              # ~max_seq_length, which was part of the same OOM; most real
+                                              # conversations are shorter than max_seq_length, so unpacked
+                                              # batches typically use less memory at the cost of some
+                                              # padding-waste throughput. Revisit if you need more speed and
+                                              # have memory headroom (see README OOM entry for the tradeoff).
   warmup_ratio: 0.03
   weight_decay: 0.01
   lr_scheduler_type: cosine
