@@ -17,6 +17,7 @@ from typing import Any, Optional
 from src import checkpoint, inference, utils
 from src.callbacks import EvaluationCallback, GPUCallback, PredictionCallback, TrainingCallback
 from src.config import ExperimentConfig
+from src.model import GRADIENT_CHECKPOINTING_KWARGS
 from src.wandb_logger import WandbLogger
 
 logger = utils.get_logger("trainer")
@@ -51,6 +52,14 @@ def build_sft_config(config: ExperimentConfig, run_dir: Path, eval_available: bo
         dataset_text_field="text",
         packing=config.training.packing,
         gradient_checkpointing=config.training.gradient_checkpointing,
+        # Matches what attach_lora() already configured via
+        # prepare_model_for_kbit_training — non-reentrant checkpointing
+        # generally holds fewer saved tensors, one real lever against CUDA
+        # OOM during backward(). Keeping both call sites in agreement avoids
+        # Trainer silently re-enabling checkpointing with different kwargs.
+        gradient_checkpointing_kwargs=(
+            GRADIENT_CHECKPOINTING_KWARGS if config.training.gradient_checkpointing else None
+        ),
         seed=config.identity.seed,
     )
 

@@ -85,8 +85,16 @@ def detect_gpu_profile(override: Optional[str] = None) -> GPUProfile:
 
 
 def configure_cuda_visible_devices(gpu_index: int) -> None:
-    """Set CUDA_VISIBLE_DEVICES. Call this before any torch CUDA initialization."""
+    """Set CUDA_VISIBLE_DEVICES and a fragmentation-reducing allocator config.
+
+    Both must be set before any torch CUDA initialization. PYTORCH_CUDA_ALLOC_CONF
+    defaults to expandable_segments:True — exactly what PyTorch's own OOM error
+    message recommends when "reserved but unallocated" memory is large relative
+    to what's actually needed; setdefault so an explicit user-set value (e.g. in
+    the Colab environment already) is never overridden.
+    """
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def resolve_torch_dtype(name: str) -> Any:
@@ -236,18 +244,34 @@ def resolve_target_modules(model: Any, override: Optional[list[str]]) -> list[st
     return sorted(names)
 
 
+# Non-reentrant checkpointing recomputes with a different autograd graph
+# structure than the (older) reentrant default, generally holding fewer
+# saved tensors at once — HF's own recommended setting for QLoRA, and one
+# real lever against CUDA OOM during backward(). trainer.py's SFTConfig
+# uses this exact same dict so the Trainer-level setting agrees with what
+# prepare_model_for_kbit_training already configured below.
+GRADIENT_CHECKPOINTING_KWARGS: dict[str, bool] = {"use_reentrant": False}
+
+
 def attach_lora(model: Any, lora_config: LoraConfigSection, continue_adapter: Optional[str]) -> Any:
     """Attach a LoRA adapter: continue an existing one, or initialize fresh.
 
-    Always: disable KV cache, enable gradient checkpointing, and run
-    prepare_model_for_kbit_training (matches reference notebook section 8's
-    ordering). Never calls merge_and_unload() on either path.
+    Always: disable KV cache and run prepare_model_for_kbit_training with
+    non-reentrant gradient checkpointing (matches reference notebook section
+    8's intent, but lets peft's own kbit-training prep own the checkpointing
+    setup — including the enable_input_require_grads() dance LoRA needs on a
+    quantized model — rather than a separate, redundant
+    model.gradient_checkpointing_enable() call beforehand). Never calls
+    merge_and_unload() on either path.
     """
     from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()
-    model = prepare_model_for_kbit_training(model)
+    model = prepare_model_for_kbit_training(
+        model,
+        use_gradient_checkpointing=True,
+        gradient_checkpointing_kwargs=GRADIENT_CHECKPOINTING_KWARGS,
+    )
 
     if continue_adapter:
         logger.info("Continuing training from prior adapter: %s", continue_adapter)

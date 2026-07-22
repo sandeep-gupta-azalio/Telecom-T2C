@@ -314,14 +314,33 @@ re-run Section 2 (Install) and Section 7 (Load Model). `model.py`'s
 `load_base_model()` also attempts an `AutoModelForImageTextToText` fallback
 automatically before raising.
 
-**OOM during training (especially on L4/T4).**
-Lower `training.batch_size` and raise `training.gradient_accumulation` to
-keep the same effective batch size; check `model.detect_gpu_profile()`'s
-recommendations (printed in Section 5/7 of the notebook). Also consider
-lowering `data.max_seq_length`. As a last resort, try
-`training.packing: false` first if generation quality looks corrupted at
-conversation boundaries post-training (packing + Gemma 4's sliding-window
-attention interaction is unverified — see below).
+**`OutOfMemoryError: CUDA out of memory` during Section 9 (Train), even on
+A100 40GB.**
+Two mitigations are already on by default: `attach_lora()` configures
+non-reentrant gradient checkpointing (`use_reentrant: False` — generally
+holds fewer saved tensors than the older reentrant default, one real lever
+against backward-pass OOM) via `prepare_model_for_kbit_training`, matched by
+the same `gradient_checkpointing_kwargs` on the `SFTConfig` side; and
+`configure_cuda_visible_devices()` sets
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — exactly what PyTorch's
+own OOM message suggests when "reserved but unallocated" memory is large
+(reduces allocator fragmentation). If you still hit OOM after those:
+1. Lower `training.batch_size` and raise `training.gradient_accumulation`
+   proportionally to keep the same effective batch size (e.g. 4/4 ->
+   2/8 -> 1/16). This is the biggest lever — activation memory scales with
+   batch size directly.
+2. Lower `data.max_seq_length` (e.g. 1536 -> 1024 or 768). With
+   `training.packing: true`, every packed sequence is close to this length,
+   so it directly sets the activation-memory floor per step.
+3. Check `model.detect_gpu_profile()`'s recommendations (printed in
+   Sections 5/7 of the notebook) — they're more conservative on L4/T4 than
+   A100 by design.
+4. As a last resort, try `training.packing: false` — non-packed batches can
+   have shorter average sequence length than a fully-packed
+   `max_seq_length`-sized block, at the cost of some padding waste. (This is
+   also the first thing to try if generation quality looks corrupted at
+   conversation boundaries post-training — packing + Gemma 4's
+   sliding-window attention interaction is unverified, see below.)
 
 **wandb not logging / "No WANDB_API_KEY found".**
 Training continues regardless — `WandbLogger` is designed to never block.
