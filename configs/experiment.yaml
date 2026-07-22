@@ -40,10 +40,12 @@ model:
   hf_token_env_var: HF_TOKEN                 # env var / Colab secret name holding the HF token
   attn_implementation: auto                  # "auto" | "flash_attention_2" | "sdpa"; auto tries flash then falls back
   torch_dtype: bfloat16                      # compute dtype for QLoRA compute + unquantized layers
-  backend: unsloth                           # "unsloth" | "transformers" — unsloth typically uses much
-                                              # less VRAM for QLoRA; not validated on real hardware by this
-                                              # project, set "transformers" if it hits its own environment
-                                              # issues (see README "Unsloth backend")
+  backend: transformers                      # "unsloth" | "transformers" — "transformers" is the
+                                              # proven-working default. "unsloth" typically uses much less
+                                              # VRAM for QLoRA but is experimental here: confirmed to fail
+                                              # on at least one Colab image with a NameError inside its own
+                                              # transformers-monkeypatching code (an unsloth/transformers
+                                              # version mismatch — see README "Model backend")
 
 # -----------------------------------------------------------------------------
 # lora: LoRA hyperparameters. Used for fresh init; ignored (adapter's own

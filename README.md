@@ -95,19 +95,26 @@ LoRA adapter are loaded:
 
 | Backend | Default? | What it is |
 |---|---|---|
-| `unsloth` | Yes | Custom kernels/patches for a curated set of architectures — confirmed to include the Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub) as of this project's authoring. Typically cuts VRAM usage substantially for QLoRA versus the plain path below. |
-| `transformers` | Fallback | The original, proven-working path (plain `transformers` + `bitsandbytes` + `peft`) that this whole project was built and debugged against. |
+| `transformers` | Yes | The original, proven-working path (plain `transformers` + `bitsandbytes` + `peft`) that this whole project was built and debugged against. |
+| `unsloth` | Experimental, opt-in | Custom kernels/patches for a curated set of architectures — confirmed to include the Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub). Typically cuts VRAM usage substantially for QLoRA versus the plain path above — worth trying if you're memory-constrained. |
 
-**`unsloth` has not been validated on real hardware by this project** — there
-was no GPU available during development, so this path was written against
-Unsloth's documented API shape but never run end-to-end. Given how many
-rounds of environment-specific breakage this project already hit getting the
-*plain* stack working on Colab (see Troubleshooting below), treat the same
-practice as load-bearing here too: **start with a small
-`data.max_train_samples` smoke test** before a full run. If `unsloth` hits
-its own compatibility issue, set `model.backend: transformers` in
-`configs/experiment.yaml` and re-run from Section 3 (Configuration) — no
-code changes needed, the plain path is fully preserved, not deleted.
+**`unsloth` is confirmed broken on at least one real Colab image** (not just
+theoretically unvalidated): `from unsloth import FastModel` raised
+`NameError: name 'auto_docstring' is not defined` inside unsloth's own
+`models/_utils.py`, which does `exec()`-based monkeypatching of transformers
+internals — its patches didn't match the installed transformers release.
+This is an unsloth/transformers version-compatibility issue, not something
+fixable from this project's code without hand-pinning exact matching
+versions of both (which this project deliberately avoids — see the
+`requirements.txt` comments on why floor/unpinned versions were chosen after
+several rounds of exactly this class of breakage). It may work on a
+different day (pip resolving a different version combination) or a
+different Colab image — if you want to try it: set `model.backend: unsloth`,
+re-run Section 2 (Install) then Section 3 onward, and **start with a small
+`data.max_train_samples` smoke test** before trusting it with a full run. If
+it fails, `load_base_model_for_backend()` raises an actionable `RuntimeError`
+telling you to flip back to `transformers` — the plain path is fully
+preserved, not deleted, and needs no other code changes to resume.
 
 Implementation notes, if you're reading the code:
 - `model.load_base_model_for_backend()` / `model.attach_lora_for_backend()`
@@ -382,6 +389,20 @@ Upgrade: `pip install -U transformers tokenizers huggingface_hub`, then
 re-run Section 2 (Install) and Section 7 (Load Model). `model.py`'s
 `load_base_model()` also attempts an `AutoModelForImageTextToText` fallback
 automatically before raising.
+
+**`NameError: name 'auto_docstring' is not defined`** (or any other
+non-`ImportError` exception) **while loading `model.backend: unsloth`.**
+Confirmed real, not hypothetical: `unsloth/models/_utils.py` does
+`exec()`-based monkeypatching of transformers internals at import time, and
+when its patches don't match the installed transformers release, it can
+raise almost any exception type from inside that `exec()` call — not a clean
+`ImportError`. `load_base_model_for_backend()` catches this broadly (not
+just `ImportError`) and re-raises an actionable `RuntimeError`. The fix is
+the same either way: set `model.backend: transformers` in
+`configs/experiment.yaml` (now the default) and re-run from Section 3 — this
+is an unsloth/transformers version-compatibility problem on Unsloth's side,
+not something to chase further from this project's code without hand-pinning
+exact matching versions of both, which this project deliberately avoids.
 
 **`OutOfMemoryError: CUDA out of memory` during Section 9 (Train), even on
 A100 40GB.**

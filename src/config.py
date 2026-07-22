@@ -54,8 +54,11 @@ class ModelConfig:
     hf_token_env_var: str = "HF_TOKEN"
     attn_implementation: str = "auto"
     torch_dtype: str = "bfloat16"
-    backend: str = "unsloth"  # "unsloth" | "transformers" — see model.py; "transformers" is the
-                              # proven-working fallback if unsloth hits its own environment issues
+    backend: str = "transformers"  # "unsloth" | "transformers" — see model.py. "transformers" is the
+                                    # proven-working default; "unsloth" is experimental (confirmed to
+                                    # fail on at least one Colab image with a NameError inside its own
+                                    # transformers-monkeypatching code — an unsloth/transformers version
+                                    # mismatch, not something this project's code can fix directly)
 
 
 @dataclass

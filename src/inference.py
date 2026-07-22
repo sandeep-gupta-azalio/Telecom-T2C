@@ -65,9 +65,15 @@ def load_model_for_inference_unsloth(
     """
     try:
         from unsloth import FastModel
-    except ImportError as exc:
+    except Exception as exc:
+        # Broad except, not just ImportError — see model.py's
+        # load_base_model_unsloth for why (unsloth's exec()-based
+        # transformers monkeypatching can raise arbitrary exception types).
         raise RuntimeError(
-            "model.backend='unsloth' but the unsloth package is not installed or failed to import."
+            f"model.backend='unsloth' but `from unsloth import FastModel` failed: {exc}. This is "
+            "commonly an unsloth/transformers version mismatch, not a missing-package issue. Set "
+            "model.backend='transformers' in configs/experiment.yaml to fall back to the "
+            "proven-working plain transformers+peft path."
         ) from exc
 
     logger.info("Reloading Unsloth adapter %s for inference...", adapter_dir)

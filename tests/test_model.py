@@ -112,5 +112,5 @@ class TestBackendDispatch:
         with pytest.raises(ValueError, match="Unknown model.backend"):
             attach_lora_for_backend(config, model=object())
 
-    def test_default_backend_is_unsloth(self):
-        assert ExperimentConfig().model.backend == "unsloth"
+    def test_default_backend_is_transformers(self):
+        assert ExperimentConfig().model.backend == "transformers"

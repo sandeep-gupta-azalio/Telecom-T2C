@@ -316,12 +316,18 @@ def load_base_model_unsloth(
     """
     try:
         from unsloth import FastModel
-    except ImportError as exc:
+    except Exception as exc:
+        # Broad except, not just ImportError: unsloth's own import-time code does
+        # exec()-based monkeypatching of transformers internals (see
+        # unsloth/models/_utils.py), which can raise arbitrary exception types
+        # (a bare NameError has been observed in practice) when its patches don't
+        # match the installed transformers version — not a clean ImportError.
         raise RuntimeError(
-            "model.backend='unsloth' but the unsloth package is not installed or failed to "
-            "import. Re-run the notebook's Install section (requirements.txt includes it), or "
-            "set model.backend='transformers' in configs/experiment.yaml to use the plain "
-            "transformers+peft path instead."
+            f"model.backend='unsloth' but `from unsloth import FastModel` failed: {exc}. This is "
+            "commonly an unsloth/transformers version mismatch (unsloth's internal patches don't "
+            "match the installed transformers release), not a missing-package issue. Set "
+            "model.backend='transformers' in configs/experiment.yaml to fall back to the "
+            "proven-working plain transformers+peft path — no other code changes needed."
         ) from exc
 
     logger.info("Loading base model %s via Unsloth FastModel (4-bit QLoRA)...", model_config.base_model)
