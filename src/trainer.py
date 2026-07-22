@@ -17,7 +17,6 @@ from typing import Any, Optional
 from src import checkpoint, inference, utils
 from src.callbacks import EvaluationCallback, GPUCallback, PredictionCallback, TrainingCallback
 from src.config import ExperimentConfig
-from src.model import GRADIENT_CHECKPOINTING_KWARGS
 from src.wandb_logger import WandbLogger
 
 logger = utils.get_logger("trainer")
@@ -30,20 +29,13 @@ def build_sft_config(config: ExperimentConfig, run_dir: Path, eval_available: bo
 
     adapter_dir = run_dir / "adapter"
 
-    # On the "unsloth" backend, attach_lora_unsloth() already configured
-    # gradient checkpointing at the model level via
-    # FastModel.get_peft_model(..., use_gradient_checkpointing="unsloth") —
-    # Unsloth's own offloaded-checkpointing implementation. Also enabling
-    # transformers' generic gradient_checkpointing here would make Trainer
-    # try to re-configure checkpointing with different (HF-style, non-
-    # reentrant) kwargs on top of Unsloth's own setup, which Unsloth's own
-    # guidance says to avoid. On the "transformers" backend, this SFTConfig
-    # setting is what actually enables/re-affirms the non-reentrant
-    # checkpointing attach_lora() configured via prepare_model_for_kbit_training.
-    use_hf_gradient_checkpointing = (
-        config.training.gradient_checkpointing and config.model.backend != "unsloth"
-    )
-
+    # model.attach_lora() already configures gradient checkpointing at the
+    # model level, via FastModel.get_peft_model(use_gradient_checkpointing=
+    # "unsloth" or False, driven by this same config.training.gradient_checkpointing
+    # flag) — Unsloth's own offloaded-checkpointing implementation. Also
+    # enabling transformers' generic gradient_checkpointing here would make
+    # Trainer try to re-configure checkpointing on top of Unsloth's own
+    # setup, which conflicts — so it's always off at the SFTConfig level.
     kwargs: dict[str, Any] = dict(
         output_dir=str(adapter_dir),
         num_train_epochs=config.training.epochs,
@@ -66,10 +58,8 @@ def build_sft_config(config: ExperimentConfig, run_dir: Path, eval_available: bo
         max_length=config.data.max_seq_length,
         dataset_text_field="text",
         packing=config.training.packing,
-        gradient_checkpointing=use_hf_gradient_checkpointing,
-        gradient_checkpointing_kwargs=(
-            GRADIENT_CHECKPOINTING_KWARGS if use_hf_gradient_checkpointing else None
-        ),
+        gradient_checkpointing=False,
+        gradient_checkpointing_kwargs=None,
         seed=config.identity.seed,
     )
 

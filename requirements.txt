@@ -1,157 +1,90 @@
 # Telecom-T2C-Trainer — pinned dependencies
 #
-# Anchored to the reference notebook's already-proven-working floor versions:
-#   transformers>=4.51.0, trl>=0.15.0, peft>=0.14.0, bitsandbytes>=0.45.0, accelerate>=1.2.0
-#
-# transformers / tokenizers / huggingface_hub are deliberately FLOOR-ONLY, not
-# pinned to an exact version. google/gemma-4-12B-it was released after this
-# project's authoring, so the true minimum transformers version that
-# recognizes its architecture is not knowable ahead of time — pinning a
-# guessed exact number risks being wrong in either direction (too old ->
-# unrecognized model_type; a fabricated "looks right" number -> may not
-# actually exist). src/model.py's load_base_model() has a runtime capability
-# check with an actionable error message as the real safety net here, not
-# this pin. At install time, prefer the newest available release of these
-# three packages.
-#
-# NO upper bound here, even though one was tried and reverted: transformers
-# genuinely CANNOT be capped below v5 for this project, confirmed via two
-# independent upstream sources —
-# https://github.com/huggingface/transformers/issues/45376 and
-# https://huggingface.co/google/gemma-4-E4B-it/discussions/17 — Gemma 4's
-# tokenizer_config.json uses transformers v5's list-format
-# `extra_special_tokens`, and v4.x's `_set_model_specific_special_tokens`
-# unconditionally calls `.keys()` on it (a v4-only, dict-shaped assumption),
-# raising `AttributeError: 'list' object has no attribute 'keys'` — this
-# happens in Section 4 (tokenizer loading), which runs on EITHER
-# model.backend, before any backend-specific code. A `<4.55.0` cap (tried
-# to work around a separate `peft` incompatibility — see below) makes
-# tokenizer loading impossible outright, which is strictly worse than the
-# peft problem it was meant to avoid. src/tokenizer.py additionally carries
-# a defensive compat shim for this exact AttributeError, so Section 4 stays
-# robust even if a future resolve somehow lands on an older transformers
-# again.
-#
-# Known separate, still-open risk this does NOT resolve: peft has no
-# working PyPI release for transformers>=4.55 (confirmed —
-# https://github.com/huggingface/peft/issues/2754, "No working peft version
-# available in PyPI for transformers 4.55+"; reproduced here with the
-# latest available peft 0.19.1: `ImportError: cannot import name
-# 'BloomPreTrainedModel' from 'transformers'` at `import peft`). That failure
-# is unconditional at `import peft` — not fixable by capping transformers,
-# since Gemma 4 needs v5 regardless — so it may still surface later, in
-# Section 8 (Load Adapter) on either backend (unsloth builds its LoRA
-# support on peft too), rather than in Section 2/4. If it does, that's a
-# genuine, currently-unresolved gap between peft's and Gemma 4's release
-# timelines, not a bug in this project's code — see README Troubleshooting.
-transformers>=4.51.0
+# This project is Unsloth-only (see src/model.py / README "Model backend").
+# transformers==5.12.1 is exact-pinned deliberately: Gemma 4's tokenizer
+# config requires transformers v5 outright (v4.x cannot load it at all —
+# see tokenizer.py's patch_extra_special_tokens_list_format() docstring),
+# and 5.12.1 is the specific release this project has actually been
+# validated against. peft/accelerate/bitsandbytes/datasets are floor-pinned
+# just above that combination rather than exact-matched to it, since they
+# still need room to pick up compatibility fixes for it (see the peft note
+# below) without requiring a requirements.txt edit each time.
+transformers==5.12.1
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 
-# peft, trl, and accelerate are ALSO floor-only, not exact-pinned: since
-# transformers is left free to resolve much newer than this project's floor,
-# an exact-pinned old release of any package whose code calls into
-# transformers' Trainer/model internals can predate an API those internals
-# now use. Confirmed for accelerate specifically:
-#   TypeError: Accelerator.unwrap_model() got an unexpected keyword
-#   argument 'keep_torch_compile'
-# — transformers 5.12.1's Trainer._wrap_model() calls
-# `self.accelerator.unwrap_model(model, keep_torch_compile=False)`, a
-# parameter accelerate==1.2.1 (this project's original exact pin, from
-# months before that transformers release) doesn't have. (peft/trl were
-# floor-pinned for the same defensive reason; one early failure that LOOKED
-# like a peft/transformers version mismatch — "Could not import module
-# 'BloomPreTrainedModel'" — turned out to be unrelated, see the torch note
-# below, but the underlying risk of peft/trl/accelerate lagging a
-# much-newer transformers is real regardless.)
-peft>=0.14.0
+peft>=0.19.1
 trl>=0.15.0
-accelerate>=1.2.0
+accelerate>=1.8
+datasets>=3.2
 
-# datasets is ALSO floor-only for the identical reason, confirmed by a real
-# pip resolver conflict: trl is floor-only above and resolved to a 1.x
-# release (a major version jump from this project's ~0.15 anchor) that
-# requires datasets>=4.7.0 — incompatible with an exact datasets==3.2.0 pin.
-# Exact-pinning any package that a fast-moving, floor-only package like trl
-# transitively depends on will eventually hit this same wall as trl's own
-# requirements move forward; only a floor here lets pip's resolver satisfy
-# whatever trl/transformers version combination actually gets installed.
-datasets>=3.2.0
+# Known, currently-unresolved upstream risk this pin set does NOT fully
+# rule out: peft has had no working PyPI release for transformers>=4.55 in
+# the past (confirmed — https://github.com/huggingface/peft/issues/2754,
+# "No working peft version available in PyPI for transformers 4.55+";
+# reproduced during this project's development as `ImportError: cannot
+# import name 'BloomPreTrainedModel' from 'transformers'` at a standalone
+# `import peft`). If that surfaces again despite the floor above, it's a
+# peft/transformers compatibility gap to track upstream, not a bug in this
+# project — see README Troubleshooting. It does not necessarily block the
+# Unsloth-mediated LoRA path (`from unsloth import FastModel`) even when a
+# standalone `import peft` fails, since Unsloth may not exercise the exact
+# broken code path — which is also why the notebook's Section 2 version
+# check no longer probes `peft` directly, only `unsloth`/`unsloth_zoo`.
 
-# unsloth is the default model.backend (see configs/experiment.yaml) —
-# custom kernels/patches for a curated set of architectures, confirmed to
-# include the Gemma 4 family (unsloth/gemma-4-12b-it exists on the Hub) as
-# of this project's authoring, typically cutting VRAM usage substantially
-# for QLoRA versus the plain transformers+bitsandbytes path. Deliberately
-# UNPINNED (not even floor-only) for the exact same reason transformers is
-# floor-only above: it needs to resolve a version that's actually compatible
-# with whatever transformers/peft/trl/torch/CUDA Colab has *today*, and
+# unsloth: custom kernels/patches for a curated set of architectures,
+# confirmed to include the Gemma 4 family (unsloth/gemma-4-12b-it exists on
+# the Hub), typically cutting VRAM usage substantially for QLoRA versus a
+# plain transformers+bitsandbytes path. Deliberately left UNPINNED (not
+# even floor-only) — it needs to resolve a version actually compatible with
+# whatever transformers/peft/trl/torch/CUDA Colab has *today*, and
 # Unsloth's own installer explicitly recommends auto-detection
 # (`--torch-backend=auto`) over manual pinning for this reason.
 #
 # unsloth_zoo is listed explicitly too, not left to resolve transitively:
 # unsloth's own exec()-based patching of transformers internals periodically
 # breaks when transformers renames something internal (confirmed pattern —
-# see https://github.com/unslothai/unsloth/issues/3415, a near-identical
-# NameError to one hit during this project's development), and the
-# maintainers' fix for that exact class of bug has historically landed as
+# see https://github.com/unslothai/unsloth/issues/3415), and the
+# maintainers' fix for that class of bug has historically landed as
 # companion PRs across BOTH unsloth and unsloth_zoo. Leaving unsloth_zoo
 # unlisted would let it resolve independently and possibly miss the paired
 # fix even when `unsloth` itself is current.
-#
-# This backend is NOT validated end-to-end on real hardware by this project
-# (no GPU available during development) — start with a small
-# data.max_train_samples smoke test before a full run, same practice already
-# established for the transformers backend. If it still hits a compatibility
-# error after re-running Section 2 (Install) with --upgrade, set
-# model.backend: transformers in configs/experiment.yaml to fall back to the
-# proven-working path without needing to touch this file.
 unsloth_zoo
 unsloth
 
-# torch is intentionally NOT pinned/listed here at all — this is the fix for
-# a confirmed, reproduced incident: pinning torch (even loosely) makes pip
-# reinstall it in Colab with whatever CUDA-toolkit-tagged wheel satisfies the
+# torch is intentionally NOT pinned/listed here at all — confirmed,
+# reproduced incident: pinning torch (even loosely) makes pip reinstall it
+# in Colab with whatever CUDA-toolkit-tagged wheel satisfies the
 # constraint, which does NOT necessarily match the CUDA build of Colab's
-# pre-installed torchaudio/torchvision. Symptom observed: `import peft`
-# failing with "Could not import module 'BloomPreTrainedModel'" — the real
-# underlying exception (visible via the notebook's Install-section traceback)
-# was `RuntimeError: Detected that PyTorch and TorchAudio were compiled with
-# different CUDA versions (PyTorch 12.4 vs TorchAudio 12.1)`, raised deep in
-# a transformers audio-loss import chain that peft's own import happens to
-# pull in — nothing to do with peft/trl versions at all. Colab's pre-installed
-# torch is already correctly matched to its own CUDA driver and to
-# torchaudio/torchvision; leaving it alone (never pip-installing/upgrading it)
-# is the safest choice for this project, which only ever targets Colab.
-# transformers/peft/trl/accelerate/bitsandbytes all declare torch as a loose
-# transitive dependency, so `pip install -r requirements.txt` is satisfied by
-# whatever torch is already present without us needing to name it explicitly.
+# pre-installed torchaudio/torchvision, causing native-extension crashes
+# deep in unrelated import chains. Colab's pre-installed torch is already
+# correctly matched to its own CUDA driver and to torchaudio/torchvision;
+# leaving it alone (never pip-installing/upgrading it) is the safest choice
+# for this project, which only ever targets Colab. Every package above
+# declares torch as a loose transitive dependency, so `pip install -r
+# requirements.txt` is satisfied by whatever torch is already present
+# without us needing to name it explicitly.
 
-# Everything below IS pinned to a concrete, mutually-compatible point release
-# — these have no equivalent tight coupling to transformers'/trl's internal
-# APIs or evolving transitive requirements, or to torch's own CUDA build, so
-# exact-pinning them is safe.
+# Everything below IS pinned/floored to a concrete release — no equivalent
+# tight coupling to transformers'/peft's internal APIs or to torch's own
+# CUDA build, so this is safe.
 bitsandbytes>=0.46.1
 sentencepiece==0.2.0
 PyYAML==6.0.2
 protobuf==5.29.3
 
-# numpy is intentionally NOT listed here at all — same fix as torch above,
-# and confirmed by a second, distinct failure: even the earlier floor-only
-# `numpy>=1.26,<3` still got touched by `pip install --upgrade` (required
-# elsewhere so floor-pin bumps actually apply — see the peft/trl note), and
-# that upgrade-in-place left numpy in a broken hybrid state on at least one
-# Colab image: numpy's own pure-Python layer and compiled C-extension layer
-# out of sync (`ImportError: cannot import name '_center' from
-# 'numpy._core.umath'`) — a known class of bug from upgrading numpy in an
-# environment where the prior install was partly system-level. This is a
-# stricter version of the same lesson as torch: floor-only pins still get
-# reinstalled by `--upgrade`, so any package whose Colab-preinstalled build
-# is load-bearing for binary compatibility (numpy, torch) needs to be left
-# out of requirements.txt entirely, not just loosely pinned. src/utils.py's
-# only numpy usage (in set_seed) is already try/except-guarded, so this
-# project has no hard dependency on numpy being present at all — whatever
-# datasets/torch/transformers pull in transitively is sufficient.
+# numpy is intentionally NOT listed here at all — same reasoning as torch
+# above, confirmed by a second, distinct incident: even a floor-only numpy
+# pin still gets touched by `pip install --upgrade` (required so other
+# floor-pin bumps in this file actually apply on re-installs), and that
+# in-place upgrade left numpy in a broken hybrid state on at least one
+# Colab image (numpy's own pure-Python layer and compiled C-extension layer
+# out of sync). Any package whose Colab-preinstalled build is load-bearing
+# for binary compatibility needs to be left out of requirements.txt
+# entirely, not just loosely pinned. src/utils.py's only numpy usage (in
+# set_seed) is already try/except-guarded, so this project has no hard
+# dependency on numpy being present at all — whatever datasets/torch/
+# transformers pull in transitively is sufficient.
 safetensors==0.4.5
 
 # Experiment tracking. Gracefully no-ops via src/wandb_logger.py if unavailable/unauthenticated.

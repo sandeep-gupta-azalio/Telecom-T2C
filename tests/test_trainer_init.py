@@ -65,22 +65,15 @@ class TestBuildSftConfig:
         sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=False)
         assert getattr(sft_config, "load_best_model_at_end", False) is False
 
-    def test_hf_gradient_checkpointing_disabled_for_unsloth_backend(self, tmp_path):
-        # attach_lora_unsloth() already configures checkpointing at the model
-        # level via FastModel.get_peft_model(use_gradient_checkpointing="unsloth");
-        # SFTConfig must not also enable transformers' own gradient_checkpointing,
-        # or Trainer would try to re-configure it with different kwargs on top.
+    def test_hf_gradient_checkpointing_always_disabled(self, tmp_path):
+        # model.attach_lora() configures checkpointing at the model level via
+        # FastModel.get_peft_model(use_gradient_checkpointing="unsloth" or False,
+        # driven by this same config.training.gradient_checkpointing flag).
+        # SFTConfig must never also enable transformers' own
+        # gradient_checkpointing, or Trainer would try to re-configure it on
+        # top of Unsloth's own setup — regardless of the flag's value.
         config = _config()
-        config.model.backend = "unsloth"
         config.training.gradient_checkpointing = True
         sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=True)
         assert sft_config.gradient_checkpointing is False
         assert sft_config.gradient_checkpointing_kwargs is None
-
-    def test_hf_gradient_checkpointing_enabled_for_transformers_backend(self, tmp_path):
-        config = _config()
-        config.model.backend = "transformers"
-        config.training.gradient_checkpointing = True
-        sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=True)
-        assert sft_config.gradient_checkpointing is True
-        assert sft_config.gradient_checkpointing_kwargs == {"use_reentrant": False}

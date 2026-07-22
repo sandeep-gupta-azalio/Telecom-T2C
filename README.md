@@ -1,9 +1,10 @@
 # Telecom-T2C-Trainer
 
 Production fine-tuning framework for continue-LoRA (QLoRA) training of
-`google/gemma-4-12B-it` on a telecom network-inventory NL query dataset.
-Runs on Google Colab (A100 40GB recommended); the notebook only orchestrates —
-all logic lives in `src/`.
+`google/gemma-4-12B-it` on a telecom network-inventory NL query dataset,
+via [Unsloth](https://github.com/unslothai/unsloth). Runs on Google Colab
+(A100 40GB recommended); the notebook only orchestrates — all logic lives
+in `src/`.
 
 **Adapters are never merged into the base model**, on any run (fresh init or
 continuation). LoRA weights are always kept as a separate adapter.
@@ -20,7 +21,7 @@ Telecom-T2C/
     dataset.py       # DatasetLoader: load/validate train/val/golden splits
     statistics.py     # token/turn statistics, histograms, time estimates
     tokenizer.py       # tokenizer + HF token loading
-    model.py           # 4-bit QLoRA base model + LoRA adapter (fresh or continue)
+    model.py           # 4-bit QLoRA base model + LoRA adapter via Unsloth (fresh or continue)
     trainer.py           # TRL SFTTrainer orchestration
     callbacks.py           # TrainerCallback subclasses (wandb wiring)
     evaluator.py             # validation/golden eval, PASS_0-4 metric interfaces
@@ -90,69 +91,50 @@ message rather than failing when it's missing.
 
 ## Model backend
 
-`model.backend` in `configs/experiment.yaml` selects how the base model and
-LoRA adapter are loaded:
+This project loads the base model and LoRA adapter exclusively via
+[Unsloth](https://github.com/unslothai/unsloth)'s `FastModel` — custom
+kernels/patches for a curated set of architectures, confirmed to include the
+Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub), typically
+cutting VRAM usage substantially for QLoRA versus a plain
+transformers+bitsandbytes+peft path. An earlier version of this project also
+supported that plain path as a config-selectable fallback; it was removed
+once Unsloth was confirmed to be the working path, to keep the
+implementation to one code path instead of two.
 
-| Backend | Default? | What it is |
-|---|---|---|
-| `unsloth` | Yes | Custom kernels/patches for a curated set of architectures — confirmed to include the Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub). Typically cuts VRAM usage substantially for QLoRA versus the plain path below. |
-| `transformers` | Fallback | The original, proven-working path (plain `transformers` + `bitsandbytes` + `peft`) that this whole project was built and debugged against. |
+**Not validated end-to-end on real hardware by this project** (no GPU
+available during development) — start with a small `data.max_train_samples`
+smoke test before trusting a full run, same practice recommended throughout
+this README.
 
-Both options load-bear on `peft` (Unsloth builds its LoRA support on peft
-too), so a `peft`/`transformers` incompatibility blocks either choice
-equally — see the `ImportError: cannot import name 'BloomPreTrainedModel'`
-entry in Troubleshooting for a real, currently-unresolved case of exactly
-that. **`transformers` is deliberately left uncapped despite this** — Gemma
-4's tokenizer config requires transformers v5's format outright (confirmed,
-not a version-gating nuance; see the `AttributeError: 'list' object has no
-attribute 'keys'` entry below), so capping transformers to dodge the peft
-issue would make tokenizer loading fail instead, on both backends, which is
-worse. These are two separate, currently-unresolved upstream compatibility
-gaps, not one problem — see Troubleshooting for both.
-
-**`unsloth` hit a real failure on one Colab image**, and it's worth
-understanding exactly what kind before trusting it again: `from unsloth
-import FastModel` raised `NameError: name 'auto_docstring' is not defined`
-inside unsloth's own `models/_utils.py`, which does `exec()`-based
-monkeypatching of transformers internals — its patches didn't match the
-installed transformers release. This is a **known, actively-fixed class of
-bug upstream**, not a dead end: transformers periodically renames internal
-symbols as it evolves, which breaks unsloth's exec()-based patching until
-the maintainers ship a matching fix — see
-[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415)
-for a near-identical case (`PreTrainedConfig` renamed to `PretrainedConfig`),
-fixed via companion PRs across **two** packages, `unsloth` and `unsloth_zoo`.
-`requirements.txt` lists both explicitly, unpinned, specifically so
-`pip install --upgrade` (Section 2) always has a chance to pick up the
-current fix for whatever transformers happens to be installed — pinning
-either package to a specific version here would just recreate the same
-problem on a future transformers release.
-
-**Practical takeaway:** re-run Section 2 (Install) to fetch the latest
-`unsloth`/`unsloth_zoo`, then retry from Section 3. If it still fails,
-`load_base_model_for_backend()` raises an actionable `RuntimeError` — set
-`model.backend: transformers` and re-run; the plain path is fully preserved,
-not deleted, and needs no other code changes to resume. Either way, **start
-with a small `data.max_train_samples` smoke test** before trusting a full
-run — this backend has not been validated end-to-end by this project (no
-GPU available during development).
+**Known, currently-unresolved upstream risk**: Unsloth builds its LoRA
+support on `peft`, and `peft` has previously had zero working PyPI release
+for `transformers>=4.55` (see the `ImportError: cannot import name
+'BloomPreTrainedModel'` entry in Troubleshooting). `requirements.txt` floors
+`peft`/`accelerate`/`trl`/`datasets` just above validated versions rather
+than exact-matching them, specifically so `pip install --upgrade` (Section
+2) has room to pick up a compatibility fix without a `requirements.txt`
+edit. Separately, Unsloth's own `exec()`-based monkeypatching of
+transformers internals periodically breaks when transformers renames
+something internal (see
+[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415));
+`unsloth`/`unsloth_zoo` are left fully unpinned for the same reason — see
+`requirements.txt`'s comments for the full reasoning on each pin.
 
 Implementation notes, if you're reading the code:
-- `model.load_base_model_for_backend()` / `model.attach_lora_for_backend()`
-  dispatch on this field; `inference.load_model_for_inference_for_backend()`
-  does the same for post-training reload.
-- The `unsloth` backend returns a tokenizer from the model-loading call
-  (Unsloth configures both together) — the notebook's Section 7 reassigns
-  its `tokenizer` variable to that return value, so everything downstream
+- `model.load_base_model()` returns `(model, tokenizer)` together — Unsloth
+  configures both in lockstep — and the notebook's Section 7 reassigns its
+  `tokenizer` variable to that return value, so everything downstream
   (training, generation) uses the Unsloth-matched tokenizer, not the one
   loaded earlier in Section 4 for dataset statistics.
-- `unsloth`'s fresh-LoRA-init path uses `use_gradient_checkpointing="unsloth"`
-  (their own offloaded-checkpointing implementation) instead of
-  transformers' generic gradient checkpointing — `trainer.build_sft_config()`
-  knows not to also enable the latter on this backend, to avoid
-  double-configuring checkpointing.
-- Both backends still never call `merge_and_unload()` — the adapter stays
-  separate from the base model either way.
+- `model.attach_lora()` uses `use_gradient_checkpointing="unsloth"` (their
+  own offloaded-checkpointing implementation) when
+  `training.gradient_checkpointing` is true, else `False` —
+  `trainer.build_sft_config()` always disables transformers' own
+  gradient_checkpointing at the `SFTConfig` level, since this is the only
+  place checkpointing gets configured; enabling both would conflict.
+- Never calls `merge_and_unload()` on either the fresh-init or
+  continue-adapter path — the adapter always stays separate from the base
+  model.
 
 ---
 
@@ -242,8 +224,8 @@ goes through, so a wandb outage never aborts a training run.
 
 **Config** (`wandb.init(config=...)`): the full set of hyperparameters
 (learning rate, batch size, LoRA rank/alpha, packing, max_seq_length, base
-model, backend) plus provenance (dataset/LoRA/generator/validator version,
-git hash) — built in the notebook's Section 9, so every run is comparable
+model) plus provenance (dataset/LoRA/generator/validator version, git hash)
+— built in the notebook's Section 9, so every run is comparable
 side-by-side in the wandb UI, not just tagged with metadata.
 
 **During training** (via `TrainingCallback`/`EvaluationCallback`/`GPUCallback`):
@@ -411,20 +393,24 @@ immediately.)
 **`TypeError: Accelerator.unwrap_model() got an unexpected keyword argument
 'keep_torch_compile'`** during Section 9 (Train), inside
 `transformers.Trainer._wrap_model()`.
-A genuine version-skew bug, not a Colab environment artifact this time:
-`transformers`' `Trainer` internals call
+A genuine version-skew bug, not a Colab environment artifact: `transformers`'
+`Trainer` internals call
 `self.accelerator.unwrap_model(model, keep_torch_compile=False)`, and that
 `keep_torch_compile` parameter doesn't exist in older `accelerate` releases.
-Since `transformers` is intentionally left floor-only to support Gemma 4,
-`accelerate` needs to float with it too — it's now floor-only in
-`requirements.txt` (`accelerate>=1.2.0`) alongside `peft`/`trl`, for the same
-reason. Fix: re-run Section 2's pip-install cell, then
+`transformers` is exact-pinned (`==5.12.1`, required for Gemma 4's tokenizer —
+see below) but `accelerate`, `peft`, `trl`, and `datasets` are deliberately
+left floor-only (`accelerate>=1.8`, `peft>=0.19.1`, `trl>=0.15.0`,
+`datasets>=3.2`) so pip has room to resolve versions that are actually
+compatible with `transformers==5.12.1`, rather than this project guessing and
+hand-pinning exact companions. Fix: re-run Section 2's pip-install cell
+(it uses `pip install --upgrade` so a floor-pin bump actually applies), then
 **Runtime -> Restart session**, then re-run from Section 1.
 
 **`AttributeError: 'list' object has no attribute 'keys'`** inside
 `transformers/tokenization_utils_base.py`'s
 `_set_model_specific_special_tokens`, while loading the tokenizer (Section
-4, `tokenizer.load_tokenizer()` — this runs on **either** `model.backend`).
+4, `tokenizer.load_tokenizer()`, or Section 7's Unsloth model load, which
+constructs its own tokenizer internally).
 Confirmed, not a version-gating nuance: `google/gemma-4-12B-it`'s
 `tokenizer_config.json` defines `extra_special_tokens` as a **list**
 (transformers v5's format), but `transformers` v4.x's
@@ -434,59 +420,55 @@ Confirmed, not a version-gating nuance: `google/gemma-4-12B-it`'s
 and the
 [google/gemma-4-E4B-it discussion](https://huggingface.co/google/gemma-4-E4B-it/discussions/17).
 **Gemma 4 genuinely requires transformers v5** for this reason —
-`requirements.txt` deliberately leaves `transformers` uncapped so pip can
-resolve v5. `tokenizer.py` also carries a defensive compat shim
+`requirements.txt` exact-pins `transformers==5.12.1` (a version confirmed to
+handle this correctly). `tokenizer.py` also carries a defensive compat shim
 (`patch_extra_special_tokens_list_format()`, applied automatically by
-`load_tokenizer()` and by both Unsloth loading paths in `model.py`/
-`inference.py`) that converts the list to a dict only if the installed
-transformers actually hits this exact `AttributeError` — a no-op on v5,
-where the native list handling is used as-is. If you still hit this, re-run
-Section 2 (Install) to make sure `transformers` actually resolved to v5 (the
-version-check cell prints it).
+`load_tokenizer()` and by both `model.load_base_model()` and
+`inference.load_model_for_inference()`, since Unsloth builds its own
+tokenizer bypassing `tokenizer.py`) that converts the list to a dict only if
+the installed transformers actually hits this exact `AttributeError` — a
+no-op on the pinned v5.12.1, where the native list handling is used as-is.
+If you still hit this, re-run Section 2 (Install) to make sure
+`transformers` actually resolved to `5.12.1` (the version-check cell prints
+it) rather than an older cached wheel.
 
 **`ImportError: cannot import name 'BloomPreTrainedModel' from
 'transformers'`** at `import peft` (in Section 2's version-check cell, or
 anywhere else `peft` gets imported) — **or** the model failing to load with
 an unrecognized-architecture / `KeyError` / `ValueError` on `model_type`.
-This is a real, currently-unresolved upstream incompatibility, separate from
-the tokenizer issue above, and this project's code cannot fully route around
-it: **`peft` has zero working PyPI release for `transformers>=4.55`** —
-confirmed via
+Historically a real, upstream incompatibility, separate from the tokenizer
+issue above: older `peft` releases had zero working PyPI release for
+`transformers>=4.55` — see
 [huggingface/peft#2754](https://github.com/huggingface/peft/issues/2754)
-("No working peft version available in PyPI for transformers 4.55+"),
-reproduced here with the latest available `peft` (0.19.1). The failure is
-unconditional — it happens the instant `import peft` runs, before any peft
-feature is actually used — so it blocks **both** `model.backend` options
-equally (Unsloth's LoRA support is built on peft too).
-
-**This project does NOT cap `transformers` to work around it** (an earlier
-version of this README/`requirements.txt` did, briefly — that cap was
-reverted because it broke tokenizer loading outright, per the entry above,
-which is worse). So this failure may still occur, typically surfacing later
-in the notebook than the tokenizer issue — at Section 8 (Load Adapter, where
-`peft`/Unsloth's LoRA attachment actually runs) rather than Section 2 or 4.
-If it does: that's a genuine gap between `peft`'s and Gemma 4's release
-timelines, not a bug in this project to fix. The only paths forward: wait
-for `peft` to ship a fix for `transformers>=4.55` (check the issue above),
-or patch around the broken import yourself, similar in spirit to the
-tokenizer compat shim above (not implemented here, since the right patch
-depends on exactly what `peft` release/fix state you're on).
+("No working peft version available in PyPI for transformers 4.55+").
+`requirements.txt` floor-pins `peft>=0.19.1` specifically because that's the
+first release confirmed to import cleanly against `transformers==5.12.1`
+(the exact-pinned version this project uses — see the tokenizer entry
+above). If you still hit this, `pip` likely resolved an older cached `peft`
+wheel: re-run Section 2's pip-install cell (it uses `pip install --upgrade`
+so this actually applies), then **Runtime -> Restart session**, then re-run
+from Section 1. If it persists even on a genuinely fresh install, that's a
+new regression in the `peft`/`transformers` compatibility matrix beyond what
+this project has verified — check the issue above for its current state.
 
 **`NameError: name 'auto_docstring' is not defined`** (or any other
-non-`ImportError` exception) **while loading `model.backend: unsloth`.**
+non-`ImportError` exception) **while loading the model in Section 7.**
 `unsloth/models/_utils.py` does `exec()`-based monkeypatching of
 transformers internals at import time, and when its patches don't match the
 installed transformers release, it can raise almost any exception type from
-inside that `exec()` call — not a clean `ImportError`.
-`load_base_model_for_backend()` catches this broadly (not just
-`ImportError`) and re-raises an actionable `RuntimeError`. This is a known,
-actively-fixed class of bug upstream (see "Model backend" above and
+inside that `exec()` call — not a clean `ImportError`. `model.load_base_model()`
+catches this broadly (not just `ImportError`) and re-raises an actionable
+`RuntimeError`. This is a known, actively-fixed class of bug upstream (see
 [unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415))
-— **first try re-running Section 2 (Install)** to fetch a newer
-`unsloth`/`unsloth_zoo` that may already contain the fix. If it's still
-broken after that, set `model.backend: transformers` in
-`configs/experiment.yaml` and re-run from Section 3 as the reliable
-fallback.
+— `requirements.txt` deliberately leaves `unsloth`/`unsloth_zoo` completely
+unpinned (per Unsloth's own recommendation) precisely so a fresh install
+picks up whatever patch set is current for `transformers==5.12.1`. **The fix
+is to re-run Section 2 (Install)** to fetch a newer `unsloth`/`unsloth_zoo`
+release, then **Runtime -> Restart session**, then re-run from Section 1.
+There is no fallback path in this project anymore (it's Unsloth-only) — if a
+fresh install still fails, this is an active upstream gap between
+`unsloth`/`unsloth_zoo` and `transformers==5.12.1`; check the issue above for
+its current state.
 
 **`OutOfMemoryError: CUDA out of memory` during Section 9 (Train), even on
 A100 40GB.**
@@ -546,14 +528,15 @@ field or file path to fix.
 
 ### Known unverified risk areas (documented, not hidden)
 
-`google/gemma-4-12B-it`'s exact `AutoModelForCausalLM` loading path,
+`google/gemma-4-12B-it`'s exact loading path through Unsloth's `FastModel`,
 flash-attention support for its hybrid sliding-window/global attention,
 correct LoRA `target_modules`, and packing-vs-sliding-window interaction are
 all unverifiable without a live run on real hardware. Defenses already
-built in: a floor-pinned `transformers` + actionable load-failure errors, an
-auto-detect fallback for `target_modules` (override via
-`lora.lora_target_modules` if the auto-detected set is wrong), and an
-`attn_implementation: auto` -> `sdpa` fallback. `training.learning_rate`
+built in: an exact-pinned `transformers==5.12.1` (the version confirmed to
+load Gemma 4's tokenizer) + actionable load-failure errors, and Unsloth's own
+`target_modules` auto-detection inside `FastModel.get_peft_model()`
+(override via `lora.lora_target_modules` if it picks the wrong set).
+`training.learning_rate`
 defaults to `1e-4`, carried over from the reference notebook's
 *continue-training* value — for this project's default **fresh** LoRA init,
 `2e-4` is more conventional and worth trying if `1e-4` converges too slowly.
@@ -570,20 +553,21 @@ pytest tests/ -v
 
 Covers dataset-loader validation (`validate_json`/`validate_messages`/
 `validate_roles`, corrupted-line handling), config loading/validation
-(missing fields, resume-directory resolution, unsloth/transformers backend
-validation), model-loading logic (`resolve_target_modules`, GPU profile
-table, attention-implementation resolution, backend-dispatch error paths —
-not actual 4-bit weight downloads for either backend), trainer
-initialization (`build_sft_config` field mapping, including the
-backend-aware gradient-checkpointing branch — no real `.train()` call),
-inference (`build_prompt`, `generate()`'s greedy-decode-then-fallback logic
-against fake model/tokenizer stand-ins), and the tokenizer v4/v5
+(missing fields, resume-directory resolution), the GPU profile table
+(`detect_gpu_profile` — override handling, unknown-override errors, T4
+marginal-capacity warning), trainer initialization (`build_sft_config` field
+mapping, including asserting that `SFTConfig.gradient_checkpointing` stays
+unconditionally `False` regardless of `training.gradient_checkpointing`,
+since Unsloth's `FastModel.get_peft_model(use_gradient_checkpointing=...)`
+owns that setting instead — no real `.train()` call), inference
+(`build_prompt`, `generate()`'s greedy-decode-then-fallback logic against
+fake model/tokenizer stand-ins), and the tokenizer v4/v5
 `extra_special_tokens` compat shim (`patch_extra_special_tokens_list_format`
 against fake buggy/fixed method stand-ins — the exact real-world
 `AttributeError` this guards against is covered by the shim's own logic
 tests, not by loading real Gemma 4 weights). Tests requiring an unavailable
-package (e.g. `trl` if not installed locally) or a GPU skip cleanly rather
-than failing. The `unsloth` backend's actual model loading is not covered by
-these tests — it needs a GPU and is unverified by this project (see "Model
-backend" above); the recommended validation is a small
-`data.max_train_samples` smoke test on Colab.
+package (e.g. `trl`/`torch` if not installed locally) skip cleanly rather
+than failing. Unsloth's actual model loading (`model.load_base_model`,
+`model.attach_lora`) is not covered by these tests — it needs a GPU and is
+unverified by this project (see "Model backend" above); the recommended
+validation is a small `data.max_train_samples` smoke test on Colab.

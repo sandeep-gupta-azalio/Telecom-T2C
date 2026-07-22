@@ -78,18 +78,6 @@ class TestValidateConfig:
         warnings = validate_config(config)
         assert any("continue_adapter" in w for w in warnings)
 
-    def test_invalid_backend_warns(self, tmp_path):
-        config = load_config(_minimal_yaml(tmp_path))
-        config.model.backend = "not-a-real-backend"
-        warnings = validate_config(config)
-        assert any("model.backend" in w for w in warnings)
-
-    def test_default_backend_has_no_warning(self, tmp_path):
-        config = load_config(_minimal_yaml(tmp_path))
-        config.drive.copy_to_drive = False
-        warnings = validate_config(config)
-        assert not any("model.backend" in w for w in warnings)
-
 
 class TestResolveRunDir:
     def test_creates_new_timestamped_dir_when_nothing_to_resume(self, tmp_path):

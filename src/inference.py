@@ -12,48 +12,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from src import model as model_mod
 from src import utils
-from src.config import ExperimentConfig, ModelConfig
+from src.config import ModelConfig
 
 logger = utils.get_logger("inference")
 
 
 def load_model_for_inference(
-    model_config: ModelConfig, adapter_dir: str, hf_token: Optional[str] = None
-) -> tuple[Any, Any]:
-    """Reload the quantized base model + adapter for standalone inference (e.g. after a runtime restart).
-
-    Mirrors notebook section 13: fresh BitsAndBytesConfig, fresh base model
-    load, PeftModel.from_pretrained(..., is_trainable=False) — never merges
-    the adapter into the base model.
-    """
-    import torch
-    from peft import PeftModel
-    from transformers import AutoModelForCausalLM
-
-    from src.tokenizer import load_tokenizer
-
-    compute_dtype = model_mod.resolve_torch_dtype(model_config.torch_dtype)
-    bnb_config = model_mod.build_bnb_config(compute_dtype)
-    attn_impl = model_mod.resolve_attn_implementation(model_config.attn_implementation)
-
-    tokenizer = load_tokenizer(adapter_dir, hf_token)
-
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_config.base_model,
-        token=hf_token,
-        quantization_config=bnb_config,
-        device_map={"": 0},
-        torch_dtype=compute_dtype,
-        attn_implementation=attn_impl,
-    )
-    inference_model = PeftModel.from_pretrained(base_model, adapter_dir, is_trainable=False)
-    logger.info("Reloaded model %s + adapter %s for inference.", model_config.base_model, adapter_dir)
-    return inference_model, tokenizer
-
-
-def load_model_for_inference_unsloth(
     model_config: ModelConfig, max_seq_length: int, adapter_dir: str, hf_token: Optional[str] = None
 ) -> tuple[Any, Any]:
     """Reload a saved Unsloth-trained adapter for standalone inference via FastModel.
@@ -66,19 +31,18 @@ def load_model_for_inference_unsloth(
     try:
         from unsloth import FastModel
     except Exception as exc:
-        # Broad except, not just ImportError — see model.py's
-        # load_base_model_unsloth for why (unsloth's exec()-based
-        # transformers monkeypatching can raise arbitrary exception types).
+        # Broad except, not just ImportError — see model.py's load_base_model
+        # for why (unsloth's exec()-based transformers monkeypatching can
+        # raise arbitrary exception types).
         raise RuntimeError(
-            f"model.backend='unsloth' but `from unsloth import FastModel` failed: {exc}. This is "
-            "commonly an unsloth/transformers version mismatch, not a missing-package issue. Set "
-            "model.backend='transformers' in configs/experiment.yaml to fall back to the "
-            "proven-working plain transformers+peft path."
+            f"`from unsloth import FastModel` failed: {exc}. This is commonly an "
+            "unsloth/transformers version mismatch. Re-run the notebook's Install section, "
+            "then Runtime -> Restart session and retry."
         ) from exc
 
     from src.tokenizer import patch_extra_special_tokens_list_format
 
-    # See model.py's load_base_model_unsloth for why: FastModel constructs a
+    # See model.py's load_base_model for why: FastModel constructs a
     # tokenizer internally, bypassing tokenizer.py's own load_tokenizer().
     patch_extra_special_tokens_list_format()
 
@@ -92,29 +56,11 @@ def load_model_for_inference_unsloth(
             dtype=None,
         )
     except Exception as exc:
-        raise RuntimeError(
-            f"Unsloth FastModel.from_pretrained({adapter_dir!r}) failed: {exc}. If this adapter "
-            "was trained with model.backend='transformers', reload it with that backend instead "
-            "(config.model.backend='transformers')."
-        ) from exc
+        raise RuntimeError(f"Unsloth FastModel.from_pretrained({adapter_dir!r}) failed: {exc}.") from exc
 
     FastModel.for_inference(model)
     logger.info("Reloaded model + adapter %s for inference via Unsloth.", adapter_dir)
     return model, tokenizer
-
-
-def load_model_for_inference_for_backend(
-    config: ExperimentConfig, adapter_dir: str, hf_token: Optional[str] = None
-) -> tuple[Any, Any]:
-    """Dispatch load_model_for_inference on config.model.backend."""
-    backend = config.model.backend
-    if backend == "unsloth":
-        return load_model_for_inference_unsloth(
-            config.model, config.data.max_seq_length, adapter_dir, hf_token
-        )
-    if backend == "transformers":
-        return load_model_for_inference(config.model, adapter_dir, hf_token)
-    raise ValueError(f"Unknown model.backend: {backend!r}. Expected 'unsloth' or 'transformers'.")
 
 
 def build_prompt(tokenizer: Any, messages: list[dict]) -> str:

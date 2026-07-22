@@ -52,15 +52,6 @@ class ModelConfig:
     base_model: str = "google/gemma-4-12B-it"
     continue_adapter: Optional[str] = None
     hf_token_env_var: str = "HF_TOKEN"
-    attn_implementation: str = "auto"
-    torch_dtype: str = "bfloat16"
-    backend: str = "unsloth"  # "unsloth" | "transformers" — see model.py. unsloth typically uses much
-                               # less VRAM for QLoRA. It hit a NameError on one Colab image from its
-                               # exec()-based transformers-monkeypatching (a known, actively-fixed class
-                               # of bug upstream — github.com/unslothai/unsloth/issues/3415); requirements.txt
-                               # pulls both unsloth and unsloth_zoo unpinned so `pip install --upgrade`
-                               # picks up the fix. "transformers" remains the proven-working fallback if
-                               # it's still broken after that.
 
 
 @dataclass
@@ -218,11 +209,6 @@ def validate_config(config: ExperimentConfig) -> list[str]:
         warnings.append(
             f"model.continue_adapter is set but not found on disk: {config.model.continue_adapter} — "
             "this will fail at model-load time unless the path exists at runtime (e.g. on Drive)."
-        )
-    if config.model.backend not in ("unsloth", "transformers"):
-        warnings.append(
-            f"model.backend={config.model.backend!r} is not 'unsloth' or 'transformers' — "
-            "model.py will raise a clear error at load time rather than silently picking one."
         )
     if config.evaluation.early_stopping and not config.evaluation.run_eval:
         warnings.append(

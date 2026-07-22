@@ -38,15 +38,6 @@ model:
   base_model: google/gemma-4-12B-it          # HF repo id
   continue_adapter: null                     # path to a prior LoRA adapter dir; null = fresh LoRA init
   hf_token_env_var: HF_TOKEN                 # env var / Colab secret name holding the HF token
-  attn_implementation: auto                  # "auto" | "flash_attention_2" | "sdpa"; auto tries flash then falls back
-  torch_dtype: bfloat16                      # compute dtype for QLoRA compute + unquantized layers
-  backend: unsloth                           # "unsloth" | "transformers" — unsloth typically uses much
-                                              # less VRAM for QLoRA. Hit a NameError on one Colab image from
-                                              # its exec()-based transformers-monkeypatching — a known,
-                                              # actively-fixed upstream bug class (see README "Model
-                                              # backend"); requirements.txt pulls unsloth + unsloth_zoo
-                                              # unpinned so `pip install --upgrade` picks up the fix.
-                                              # "transformers" remains the proven-working fallback.
 
 # -----------------------------------------------------------------------------
 # lora: LoRA hyperparameters. Used for fresh init; ignored (adapter's own
