@@ -58,6 +58,39 @@ class TestLoadConfig:
         config = load_config(shipped)
         assert config.model.base_model == "google/gemma-4-12B-it"
 
+    def test_bare_scientific_notation_learning_rate_coerced_to_float(self, tmp_path):
+        # PyYAML's SafeLoader does not recognize bare scientific notation
+        # (no decimal point) as a float — `learning_rate: 1e-4` parses as the
+        # string "1e-4", which used to flow silently into TrainingConfig and
+        # crash deep inside Unsloth's compiled SFTConfig instead of here.
+        path = tmp_path / "experiment.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "data": {"train_path": "t", "val_path": "v"},
+                    "training": {"learning_rate": "1e-4"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = load_config(path)
+        assert config.training.learning_rate == 1e-4
+        assert isinstance(config.training.learning_rate, float)
+
+    def test_non_numeric_string_for_float_field_raises_config_error(self, tmp_path):
+        path = tmp_path / "experiment.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "data": {"train_path": "t", "val_path": "v"},
+                    "training": {"learning_rate": "not_a_number"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="learning_rate"):
+            load_config(path)
+
 
 class TestValidateConfig:
     def test_golden_eval_source_without_golden_path_warns(self, tmp_path):

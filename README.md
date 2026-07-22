@@ -642,7 +642,32 @@ own OOM message suggests when "reserved but unallocated" memory is large
 **wandb not logging / "No WANDB_API_KEY found".**
 Training continues regardless — `WandbLogger` is designed to never block.
 Add the `WANDB_API_KEY` Colab secret or set `wandb.wandb_mode: offline` /
-`disabled` explicitly to silence the warning.
+`disabled` explicitly to silence the warning. If you see `wandb.login()
+failed (API key must have 40+ characters, has N.)`, the Colab secret isn't
+a real W&B API key (they're always 40 characters) — check
+[wandb.ai/authorize](https://wandb.ai/authorize) for your actual key. This
+isn't fatal either way; it just falls back to `wandb_mode='offline'`.
+
+**`TypeError: '<' not supported between instances of 'str' and 'float'`**
+during Section 9 (Train), inside Unsloth's compiled
+`unsloth_compiled_cache/UnslothSFTTrainer.py` (e.g. comparing
+`learning_rate < 1e-7`).
+Not an Unsloth bug — a YAML gotcha in whatever numeric field you last
+edited in `configs/experiment.yaml`. PyYAML's `SafeLoader` does not
+recognize bare scientific notation as a float: `learning_rate: 1e-4` (no
+decimal point) parses as the **string** `"1e-4"`, not the float `0.0001` —
+only `1.0e-4` or a plain decimal like `0.0001` gets recognized. Python
+dataclasses don't validate/coerce field types at construction time, so
+that string used to flow silently all the way to Unsloth's compiled
+`SFTConfig`, crashing on the comparison there instead of at config-load
+time. `config.py`'s `_coerce_numeric_fields()` now catches this at
+`load_config()` time (Section 3) for every `int`/`float` field across all
+config sections, either coercing the numeric-looking string or raising an
+actionable `ConfigError` naming the exact field and value if it's not
+numeric at all. If you're on an older copy of this repo without this
+check, either `git pull`, or just rewrite the offending YAML value with an
+explicit decimal point (`1.0e-4`) or plain decimal (`0.0001`) instead of
+bare scientific notation.
 
 **`continue_adapter` path not found.**
 `config.validate_config()` prints a warning at Configuration time (Section
@@ -695,7 +720,10 @@ pytest tests/ -v
 
 Covers dataset-loader validation (`validate_json`/`validate_messages`/
 `validate_roles`, corrupted-line handling), config loading/validation
-(missing fields, resume-directory resolution), the GPU profile table
+(missing fields, resume-directory resolution, and `_coerce_numeric_fields`
+turning YAML's bare-scientific-notation gotcha, e.g. `learning_rate: 1e-4`
+parsing as the string `"1e-4"`, into either a correctly-coerced float or an
+actionable `ConfigError` — see Troubleshooting), the GPU profile table
 (`detect_gpu_profile` — override handling, unknown-override errors, T4
 marginal-capacity warning), trainer initialization (`build_sft_config` field
 mapping, including asserting that `SFTConfig.gradient_checkpointing` stays

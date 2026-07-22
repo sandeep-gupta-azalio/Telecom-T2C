@@ -8,6 +8,7 @@ instance rather than parsing YAML itself.
 from __future__ import annotations
 
 import re
+import typing
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -123,6 +124,54 @@ class ReproducibilityConfig:
     run_id: Optional[str] = None
 
 
+def _coerce_numeric_fields(cls: type, data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce numeric-looking string values to int/float per cls's type hints.
+
+    PyYAML's SafeLoader has a well-known implicit-typing gotcha: scientific
+    notation without an explicit decimal point (e.g. `learning_rate: 1e-4`,
+    a very natural way to write this) does not match its float regex and is
+    left as the plain string "1e-4" — dataclasses don't validate/coerce
+    types at construction time, so that string then flows silently all the
+    way to a third-party library (e.g. Unsloth's compiled SFTConfig doing
+    `learning_rate < 1e-7`), surfacing as a confusing
+    `TypeError: '<' not supported between instances of 'str' and 'float'`
+    deep inside someone else's code instead of an actionable error here.
+    Uses typing.get_type_hints (not dataclasses.fields(cls)[i].type
+    directly) since this module's `from __future__ import annotations`
+    makes raw field.type a string, not the real type object.
+    """
+    if not data:
+        return data
+    hints = typing.get_type_hints(cls)
+    coerced = dict(data)
+    for key, value in data.items():
+        if key not in hints or not isinstance(value, str):
+            continue
+        target = hints[key]
+        if typing.get_origin(target) is typing.Union:
+            non_none = [a for a in typing.get_args(target) if a is not type(None)]
+            target = non_none[0] if len(non_none) == 1 else target
+        if target is float:
+            try:
+                coerced[key] = float(value)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{cls.__name__}.{key} must be a number, got {value!r}. If "
+                    "you're using scientific notation in YAML, write it with an "
+                    "explicit decimal point (e.g. 1.0e-4) or as a plain decimal "
+                    "(0.0001) — bare `1e-4` is not recognized as a float by "
+                    "YAML's implicit typing and is left as a string."
+                ) from exc
+        elif target is int:
+            try:
+                coerced[key] = int(value)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{cls.__name__}.{key} must be an integer, got {value!r}."
+                ) from exc
+    return coerced
+
+
 @dataclass
 class ExperimentConfig:
     identity: IdentityConfig = field(default_factory=IdentityConfig)
@@ -143,16 +192,18 @@ class ExperimentConfig:
     def from_dict(cls, data: dict[str, Any]) -> "ExperimentConfig":
         try:
             return cls(
-                identity=IdentityConfig(**(data.get("identity") or {})),
-                data=DataConfig(**(data.get("data") or {})),
-                model=ModelConfig(**(data.get("model") or {})),
-                lora=LoraConfigSection(**(data.get("lora") or {})),
-                training=TrainingConfig(**(data.get("training") or {})),
-                evaluation=EvaluationConfig(**(data.get("evaluation") or {})),
-                wandb=WandbConfig(**(data.get("wandb") or {})),
-                drive=DriveConfig(**(data.get("drive") or {})),
-                hardware=HardwareConfig(**(data.get("hardware") or {})),
-                reproducibility=ReproducibilityConfig(**(data.get("reproducibility") or {})),
+                identity=IdentityConfig(**_coerce_numeric_fields(IdentityConfig, data.get("identity") or {})),
+                data=DataConfig(**_coerce_numeric_fields(DataConfig, data.get("data") or {})),
+                model=ModelConfig(**_coerce_numeric_fields(ModelConfig, data.get("model") or {})),
+                lora=LoraConfigSection(**_coerce_numeric_fields(LoraConfigSection, data.get("lora") or {})),
+                training=TrainingConfig(**_coerce_numeric_fields(TrainingConfig, data.get("training") or {})),
+                evaluation=EvaluationConfig(**_coerce_numeric_fields(EvaluationConfig, data.get("evaluation") or {})),
+                wandb=WandbConfig(**_coerce_numeric_fields(WandbConfig, data.get("wandb") or {})),
+                drive=DriveConfig(**_coerce_numeric_fields(DriveConfig, data.get("drive") or {})),
+                hardware=HardwareConfig(**_coerce_numeric_fields(HardwareConfig, data.get("hardware") or {})),
+                reproducibility=ReproducibilityConfig(
+                    **_coerce_numeric_fields(ReproducibilityConfig, data.get("reproducibility") or {})
+                ),
             )
         except TypeError as exc:
             raise ConfigError(f"Unrecognized field in experiment.yaml: {exc}") from exc
