@@ -318,6 +318,24 @@ directory regardless of what's already there.
 
 ## Troubleshooting
 
+**You've re-run Install + "Restart session" a couple of times already and
+keep hitting a *different* missing-symbol `ImportError` each time** (not the
+same one repeating) — e.g. `BloomPreTrainedModel`, then `auto_docstring`,
+then `AutoProcessor` (a class that's existed in `transformers` since ~2022,
+so its absence isn't a real version-gating issue — a strong sign of
+something else). **Read this first, before chasing another individual pin:**
+"Runtime -> Restart session" only restarts the Python process — it does
+**not** reset installed packages. Every `pip install`/`--upgrade` run in this
+conversation (and in your own session) is still sitting on disk, and repeated
+installs/upgrades across a long session can leave `site-packages` in a
+genuinely inconsistent state (partial overwrites, stale `.dist-info`
+metadata) that produces different, seemingly-unrelated import errors on each
+attempt. Fix: **Runtime -> Disconnect and delete runtime**, reconnect (a
+truly fresh VM, not just a fresh Python process), then run Section 2
+(Install) once from that clean slate before troubleshooting further — this
+resets the ground you're debugging from, rather than layering another fix on
+top of an increasingly muddled environment.
+
 **Pulled a `requirements.txt` fix but Colab is still failing the same way.**
 Editing this repo on GitHub does not change anything in an already-open
 Colab session — Colab has its own copy of the files from whenever you last
