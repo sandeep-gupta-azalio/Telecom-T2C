@@ -412,11 +412,18 @@ different torch op signature than the installed torch build actually
 registers, that reference raises `AttributeError` (not `ImportError`),
 uncaught, taking down the entire `unsloth`/`unsloth_zoo` import chain.
 This project never uses `torchao` — Section 2 (Install) now runs
-`pip uninstall -y torchaudio torchao` before installing `requirements.txt`
-(both in the same call, since they're the same bug class), which makes
-`is_torchao_available()` correctly return `False` and skip that code path
-entirely. If you're on an older copy of this notebook that only uninstalls
-`torchaudio`, pull the latest version, or run it manually:
+`pip uninstall -y torchaudio torchao` **after** installing
+`requirements.txt`, not before. Order matters here: `unsloth_zoo`'s own
+`pyproject.toml` unconditionally declares `torchao>=0.13.0` as a base
+dependency (confirmed by reading it directly on GitHub) — so an earlier
+version of this notebook that uninstalled torchao *before* running
+`pip install --upgrade -r requirements.txt` just got it silently
+reinstalled by that very next step, via `unsloth_zoo`. Uninstalling
+afterward makes `is_torchao_available()` correctly return `False` for the
+rest of the session, regardless of what pulled torchao back in during
+install. If you're on an older copy of this notebook where the uninstall
+runs before the install (or only covers `torchaudio`), pull the latest
+version, or run it manually right now:
 ```python
 import subprocess, sys
 subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchao"])
