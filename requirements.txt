@@ -1,15 +1,29 @@
 # Telecom-T2C-Trainer — pinned dependencies
 #
 # This project is Unsloth-only (see src/model.py / README "Model backend").
-# transformers==5.12.1 is exact-pinned deliberately: Gemma 4's tokenizer
-# config requires transformers v5 outright (v4.x cannot load it at all —
-# see tokenizer.py's patch_extra_special_tokens_list_format() docstring),
-# and 5.12.1 is the specific release this project has actually been
-# validated against. peft/accelerate/bitsandbytes/datasets are floor-pinned
-# just above that combination rather than exact-matched to it, since they
-# still need room to pick up compatibility fixes for it (see the peft note
-# below) without requiring a requirements.txt edit each time.
-transformers==5.12.1
+# transformers==5.5.0 is exact-pinned deliberately, for two combined reasons:
+# 1. Gemma 4's tokenizer config requires transformers v5 outright (v4.x
+#    cannot load it at all — see tokenizer.py's
+#    patch_extra_special_tokens_list_format() docstring).
+# 2. 5.5.0 is the HIGHEST transformers release unsloth's own pyproject.toml
+#    declares support for — confirmed by reading it directly (both
+#    unslothai/unsloth and unslothai/unsloth-zoo pin
+#    "transformers>=4.51.3,...,!=5.0.0,!=5.1.0,<=5.5.0"). An earlier attempt
+#    to exact-pin transformers==5.12.1 installed fine at the pip level (that
+#    specific PyPI unsloth/unsloth_zoo release's metadata didn't hard-block
+#    it) but failed at runtime with `NameError: name 'auto_docstring' is not
+#    defined` inside unsloth's exec()-based transformers-internals patching
+#    (unsloth/models/_utils.py) — unsloth's patch code was written against
+#    transformers source structure up to 5.5.0 and doesn't know how to
+#    handle whatever changed in later releases (heavier use of the
+#    `@auto_docstring` decorator, evidently). Do not raise this pin above
+#    5.5.0 without first confirming unsloth's pyproject.toml has raised its
+#    own ceiling to match.
+# peft/accelerate/bitsandbytes/datasets are floor-pinned just above this
+# combination rather than exact-matched to it, since they still need room to
+# pick up compatibility fixes for it (see the peft note below) without
+# requiring a requirements.txt edit each time.
+transformers==5.5.0
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 

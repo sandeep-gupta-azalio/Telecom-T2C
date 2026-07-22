@@ -397,11 +397,11 @@ A genuine version-skew bug, not a Colab environment artifact: `transformers`'
 `Trainer` internals call
 `self.accelerator.unwrap_model(model, keep_torch_compile=False)`, and that
 `keep_torch_compile` parameter doesn't exist in older `accelerate` releases.
-`transformers` is exact-pinned (`==5.12.1`, required for Gemma 4's tokenizer —
+`transformers` is exact-pinned (`==5.5.0`, required for Gemma 4's tokenizer —
 see below) but `accelerate`, `peft`, `trl`, and `datasets` are deliberately
 left floor-only (`accelerate>=1.8`, `peft>=0.19.1`, `trl>=0.15.0`,
 `datasets>=3.2`) so pip has room to resolve versions that are actually
-compatible with `transformers==5.12.1`, rather than this project guessing and
+compatible with `transformers==5.5.0`, rather than this project guessing and
 hand-pinning exact companions. Fix: re-run Section 2's pip-install cell
 (it uses `pip install --upgrade` so a floor-pin bump actually applies), then
 **Runtime -> Restart session**, then re-run from Section 1.
@@ -420,16 +420,16 @@ Confirmed, not a version-gating nuance: `google/gemma-4-12B-it`'s
 and the
 [google/gemma-4-E4B-it discussion](https://huggingface.co/google/gemma-4-E4B-it/discussions/17).
 **Gemma 4 genuinely requires transformers v5** for this reason —
-`requirements.txt` exact-pins `transformers==5.12.1` (a version confirmed to
+`requirements.txt` exact-pins `transformers==5.5.0` (a version confirmed to
 handle this correctly). `tokenizer.py` also carries a defensive compat shim
 (`patch_extra_special_tokens_list_format()`, applied automatically by
 `load_tokenizer()` and by both `model.load_base_model()` and
 `inference.load_model_for_inference()`, since Unsloth builds its own
 tokenizer bypassing `tokenizer.py`) that converts the list to a dict only if
 the installed transformers actually hits this exact `AttributeError` — a
-no-op on the pinned v5.12.1, where the native list handling is used as-is.
+no-op on the pinned v5.5.0, where the native list handling is used as-is.
 If you still hit this, re-run Section 2 (Install) to make sure
-`transformers` actually resolved to `5.12.1` (the version-check cell prints
+`transformers` actually resolved to `5.5.0` (the version-check cell prints
 it) rather than an older cached wheel.
 
 **`ImportError: cannot import name 'BloomPreTrainedModel' from
@@ -442,7 +442,7 @@ issue above: older `peft` releases had zero working PyPI release for
 [huggingface/peft#2754](https://github.com/huggingface/peft/issues/2754)
 ("No working peft version available in PyPI for transformers 4.55+").
 `requirements.txt` floor-pins `peft>=0.19.1` specifically because that's the
-first release confirmed to import cleanly against `transformers==5.12.1`
+first release confirmed to import cleanly against `transformers==5.5.0`
 (the exact-pinned version this project uses — see the tokenizer entry
 above). If you still hit this, `pip` likely resolved an older cached `peft`
 wheel: re-run Section 2's pip-install cell (it uses `pip install --upgrade`
@@ -458,17 +458,30 @@ transformers internals at import time, and when its patches don't match the
 installed transformers release, it can raise almost any exception type from
 inside that `exec()` call — not a clean `ImportError`. `model.load_base_model()`
 catches this broadly (not just `ImportError`) and re-raises an actionable
-`RuntimeError`. This is a known, actively-fixed class of bug upstream (see
-[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415))
-— `requirements.txt` deliberately leaves `unsloth`/`unsloth_zoo` completely
-unpinned (per Unsloth's own recommendation) precisely so a fresh install
-picks up whatever patch set is current for `transformers==5.12.1`. **The fix
-is to re-run Section 2 (Install)** to fetch a newer `unsloth`/`unsloth_zoo`
-release, then **Runtime -> Restart session**, then re-run from Section 1.
-There is no fallback path in this project anymore (it's Unsloth-only) — if a
-fresh install still fails, this is an active upstream gap between
-`unsloth`/`unsloth_zoo` and `transformers==5.12.1`; check the issue above for
-its current state.
+`RuntimeError`.
+
+**Root cause, confirmed by reading unsloth's own `pyproject.toml` directly**
+(both `unslothai/unsloth` and `unslothai/unsloth-zoo`): they declare
+`transformers>=4.51.3,...,!=5.0.0,!=5.1.0,<=5.5.0` — i.e. **`5.5.0` is the
+highest transformers release unsloth has actually declared support for.**
+An earlier version of this project's `requirements.txt` exact-pinned
+`transformers==5.12.1`, which is *above* that ceiling; pip still installed
+it without complaint (that PyPI release's metadata didn't hard-block it),
+but unsloth's `_utils.py` patch code — written against transformers source
+up to `5.5.0` — didn't know how to handle whatever changed structurally in
+later releases (heavier use of the `@auto_docstring` decorator, evidently),
+raising this `NameError` at import time. `requirements.txt` now exact-pins
+`transformers==5.5.0` specifically to stay within unsloth's own declared
+range. If you're on an older clone of this repo still pinning `5.12.1` (or
+anything else above `5.5.0`), `git pull` to get the corrected pin, then
+re-run Section 2 (Install), then **Runtime -> Restart session**, then
+re-run from Section 1. `unsloth`/`unsloth_zoo` themselves stay fully
+unpinned (per Unsloth's own recommendation) so a fresh install still picks
+up the latest patch set *for* `transformers==5.5.0` — see
+[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415)
+for the general class of bug. Do not raise the `transformers` pin above
+`5.5.0` without first re-checking unsloth's `pyproject.toml` to confirm its
+ceiling has actually moved.
 
 **`OutOfMemoryError: CUDA out of memory` during Section 9 (Train), even on
 A100 40GB.**
@@ -532,7 +545,7 @@ field or file path to fix.
 flash-attention support for its hybrid sliding-window/global attention,
 correct LoRA `target_modules`, and packing-vs-sliding-window interaction are
 all unverifiable without a live run on real hardware. Defenses already
-built in: an exact-pinned `transformers==5.12.1` (the version confirmed to
+built in: an exact-pinned `transformers==5.5.0` (the version confirmed to
 load Gemma 4's tokenizer) + actionable load-failure errors, and Unsloth's own
 `target_modules` auto-detection inside `FastModel.get_peft_model()`
 (override via `lora.lora_target_modules` if it picks the wrong set).
