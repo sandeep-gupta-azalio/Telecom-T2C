@@ -58,16 +58,22 @@ sentencepiece==0.2.0
 PyYAML==6.0.2
 protobuf==5.29.3
 
-# numpy is FLOOR-ONLY, not exact-pinned, for the same reason as the
-# transformers trio above, plus a concrete Colab-specific failure mode:
-# hosted Colab images ship numpy 2.x by default with pandas/pyarrow wheels
-# already compiled against its (larger) dtype ABI. Forcing an exact numpy
-# 1.x pin here downgrades numpy without also rebuilding those already-
-# compiled binaries, producing "ValueError: numpy.dtype size changed, may
-# indicate binary incompatibility" on the first `import pandas` (pulled in
-# transitively by `datasets`). Leaving numpy unpinned-below-3 lets pip keep
-# it aligned with whatever pandas/pyarrow the Colab image already has.
-numpy>=1.26,<3
+# numpy is intentionally NOT listed here at all — same fix as torch above,
+# and confirmed by a second, distinct failure: even the earlier floor-only
+# `numpy>=1.26,<3` still got touched by `pip install --upgrade` (required
+# elsewhere so floor-pin bumps actually apply — see the peft/trl note), and
+# that upgrade-in-place left numpy in a broken hybrid state on at least one
+# Colab image: numpy's own pure-Python layer and compiled C-extension layer
+# out of sync (`ImportError: cannot import name '_center' from
+# 'numpy._core.umath'`) — a known class of bug from upgrading numpy in an
+# environment where the prior install was partly system-level. This is a
+# stricter version of the same lesson as torch: floor-only pins still get
+# reinstalled by `--upgrade`, so any package whose Colab-preinstalled build
+# is load-bearing for binary compatibility (numpy, torch) needs to be left
+# out of requirements.txt entirely, not just loosely pinned. src/utils.py's
+# only numpy usage (in set_seed) is already try/except-guarded, so this
+# project has no hard dependency on numpy being present at all — whatever
+# datasets/torch/transformers pull in transitively is sufficient.
 safetensors==0.4.5
 
 # Experiment tracking. Gracefully no-ops via src/wandb_logger.py if unavailable/unauthenticated.

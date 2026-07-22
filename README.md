@@ -239,18 +239,24 @@ already-installed version in place because it technically still "satisfies"
 the constraint — if you're on an older copy of this notebook without
 `--upgrade` in that cell, add it, or just re-clone.
 
-**`ValueError: numpy.dtype size changed, may indicate binary incompatibility`
-during Section 2 (Install), usually while importing `datasets`.**
-Colab's base image ships numpy 2.x with pandas/pyarrow already compiled
-against it. `requirements.txt` intentionally leaves `numpy` floor-only
-(`numpy>=1.26,<3`, not exact-pinned) so `pip install` doesn't force a
-downgrade that breaks those already-compiled binaries mid-kernel-session —
-if you still hit this, it means pip changed numpy/pandas/pyarrow versions in
-this already-running process. Fix: re-run Section 2's pip-install cell, then
-**Runtime -> Restart session**, then re-run the notebook from Section 1. The
-Section 2 version-check cell reports every package's import status (not
-just the first failure) and prints this same hint automatically if anything
-fails.
+**`ValueError: numpy.dtype size changed, may indicate binary incompatibility`**
+(usually while importing `datasets`/`pandas`), **or
+`ImportError: cannot import name '_center' from 'numpy._core.umath'`**
+(numpy's own pure-Python and compiled layers out of sync).
+Both are the same underlying lesson, learned the hard way: `requirements.txt`
+does not list `numpy` at all, on purpose. Colab's pre-installed numpy is
+already correctly matched to the pandas/pyarrow wheels shipped alongside it;
+even a *loosely* floor-pinned `numpy>=1.26,<3` still gets touched by
+`pip install --upgrade` (required elsewhere so other floor-pin bumps
+actually apply — see below) and that in-place upgrade can leave numpy in a
+broken hybrid state on Colab specifically. Same reasoning as `torch` (also
+never listed) — if you still hit either error, something reinstalled numpy
+or torch in this session (a stale `requirements.txt`, a manual `%pip
+install numpy==...`/`torch==...` cell, or an earlier run in the same
+session); remove that, then **Runtime -> Restart session**, then re-run the
+notebook from Section 1. The Section 2 version-check cell reports every
+package's import status (not just the first failure) and prints a
+remediation hint automatically if anything fails.
 
 **`peft: FAILED — Could not import module 'X'. Are this object's
 requirements defined correctly?`** (commonly `'BloomPreTrainedModel'` or
