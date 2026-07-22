@@ -37,6 +37,16 @@ peft>=0.14.0
 trl>=0.15.0
 accelerate>=1.2.0
 
+# datasets is ALSO floor-only for the identical reason, confirmed by a real
+# pip resolver conflict: trl is floor-only above and resolved to a 1.x
+# release (a major version jump from this project's ~0.15 anchor) that
+# requires datasets>=4.7.0 — incompatible with an exact datasets==3.2.0 pin.
+# Exact-pinning any package that a fast-moving, floor-only package like trl
+# transitively depends on will eventually hit this same wall as trl's own
+# requirements move forward; only a floor here lets pip's resolver satisfy
+# whatever trl/transformers version combination actually gets installed.
+datasets>=3.2.0
+
 # unsloth is the default model.backend (see configs/experiment.yaml) —
 # custom kernels/patches for a curated set of architectures, confirmed to
 # include the Gemma 4 family (unsloth/gemma-4-12b-it exists on the Hub) as
@@ -87,10 +97,9 @@ unsloth
 # whatever torch is already present without us needing to name it explicitly.
 
 # Everything below IS pinned to a concrete, mutually-compatible point release
-# — these have no equivalent tight coupling to transformers' internal
-# per-architecture class exports or to torch's own CUDA build, so
+# — these have no equivalent tight coupling to transformers'/trl's internal
+# APIs or evolving transitive requirements, or to torch's own CUDA build, so
 # exact-pinning them is safe.
-datasets==3.2.0
 bitsandbytes>=0.46.1
 sentencepiece==0.2.0
 PyYAML==6.0.2
