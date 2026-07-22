@@ -1,29 +1,51 @@
 # Telecom-T2C-Trainer — pinned dependencies
 #
 # This project is Unsloth-only (see src/model.py / README "Model backend").
-# transformers==5.5.0 is exact-pinned deliberately, for two combined reasons:
-# 1. Gemma 4's tokenizer config requires transformers v5 outright (v4.x
-#    cannot load it at all — see tokenizer.py's
-#    patch_extra_special_tokens_list_format() docstring).
-# 2. 5.5.0 is the HIGHEST transformers release unsloth's own pyproject.toml
-#    declares support for — confirmed by reading it directly (both
-#    unslothai/unsloth and unslothai/unsloth-zoo pin
-#    "transformers>=4.51.3,...,!=5.0.0,!=5.1.0,<=5.5.0"). An earlier attempt
-#    to exact-pin transformers==5.12.1 installed fine at the pip level (that
-#    specific PyPI unsloth/unsloth_zoo release's metadata didn't hard-block
-#    it) but failed at runtime with `NameError: name 'auto_docstring' is not
+# transformers==5.10.2 is exact-pinned deliberately. This has moved twice
+# before landing here — each move is load-bearing history, not dead code:
+# 1. transformers v5 is required outright for Gemma 4's tokenizer format
+#    (v4.x cannot load it at all — see tokenizer.py's
+#    patch_extra_special_tokens_list_format() docstring). Any v5.x satisfies
+#    this part.
+# 2. An exact pin of transformers==5.12.1 installed fine at the pip level but
+#    failed at runtime with `NameError: name 'auto_docstring' is not
 #    defined` inside unsloth's exec()-based transformers-internals patching
-#    (unsloth/models/_utils.py) — unsloth's patch code was written against
-#    transformers source structure up to 5.5.0 and doesn't know how to
-#    handle whatever changed in later releases (heavier use of the
-#    `@auto_docstring` decorator, evidently). Do not raise this pin above
-#    5.5.0 without first confirming unsloth's pyproject.toml has raised its
-#    own ceiling to match.
+#    (unsloth/models/_utils.py) — confirmed via unslothai/unsloth's own
+#    pyproject.toml declaring "transformers>=4.51.3,...,<=5.5.0" as its
+#    tested ceiling, well below 5.12.1. This project then capped down to
+#    transformers==5.5.0 to stay within that ceiling.
+# 3. transformers==5.5.0 turned out to be too OLD instead: `google/gemma-4-12B-it`
+#    uses the `gemma4_unified` model_type/architecture, which transformers
+#    only registered in a later release (its modeling code first appears at
+#    tag v5.10.2), so loading failed with `ValueError: The checkpoint you are
+#    trying to load has model type 'gemma4_unified' but Transformers does not
+#    recognize this architecture` -> Unsloth's own wrapper turns this into
+#    "`google/gemma-4-12B-it` is not supported yet in `transformers==5.5.0`."
+#    This is a confirmed, exact match for
+#    https://github.com/unslothai/unsloth/issues/5985 ("unsloth-zoo pins
+#    transformers<=5.5.0 but Gemma 4 12B needs a newer version"), fixed by
+#    unsloth's own maintainer in
+#    https://github.com/unslothai/unsloth/pull/6054, which pairs Gemma-4-12B
+#    specifically with transformers==5.10.2 — the version that added
+#    `gemma4_unified` support. That PR predates 5.12.1 (where unsloth's own
+#    patching breaks per point 2 above), so 5.10.2 is the narrow window that
+#    satisfies both constraints at once: new enough to recognize Gemma 4's
+#    architecture, old enough for unsloth's current exec()-based patches to
+#    still work against it.
+# Note: unsloth/unsloth-zoo's `main`-branch pyproject.toml still declares its
+# ceiling as <=5.5.0 as of this writing, which appears to lag behind what
+# they've actually shipped/fixed on PyPI (an empirical fact confirmed by
+# 5.12.1 installing without a pip-level conflict at all in point 2 above,
+# despite exceeding that declared ceiling) — so do not treat that file as
+# authoritative on its own; the GitHub issue/PR above are the more current,
+# specific signal for this exact model. If this pin needs to move again,
+# re-check both: unsloth's current issue tracker for this model, and whether
+# the auto_docstring-style patching crash recurs at the new version.
 # peft/accelerate/bitsandbytes/datasets are floor-pinned just above this
 # combination rather than exact-matched to it, since they still need room to
 # pick up compatibility fixes for it (see the peft note below) without
 # requiring a requirements.txt edit each time.
-transformers==5.5.0
+transformers==5.10.2
 tokenizers>=0.21.0
 huggingface_hub>=0.26.0
 
