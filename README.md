@@ -95,26 +95,35 @@ LoRA adapter are loaded:
 
 | Backend | Default? | What it is |
 |---|---|---|
-| `transformers` | Yes | The original, proven-working path (plain `transformers` + `bitsandbytes` + `peft`) that this whole project was built and debugged against. |
-| `unsloth` | Experimental, opt-in | Custom kernels/patches for a curated set of architectures — confirmed to include the Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub). Typically cuts VRAM usage substantially for QLoRA versus the plain path above — worth trying if you're memory-constrained. |
+| `unsloth` | Yes | Custom kernels/patches for a curated set of architectures — confirmed to include the Gemma 4 family (`unsloth/gemma-4-12b-it` exists on the Hub). Typically cuts VRAM usage substantially for QLoRA versus the plain path below. |
+| `transformers` | Fallback | The original, proven-working path (plain `transformers` + `bitsandbytes` + `peft`) that this whole project was built and debugged against. |
 
-**`unsloth` is confirmed broken on at least one real Colab image** (not just
-theoretically unvalidated): `from unsloth import FastModel` raised
-`NameError: name 'auto_docstring' is not defined` inside unsloth's own
-`models/_utils.py`, which does `exec()`-based monkeypatching of transformers
-internals — its patches didn't match the installed transformers release.
-This is an unsloth/transformers version-compatibility issue, not something
-fixable from this project's code without hand-pinning exact matching
-versions of both (which this project deliberately avoids — see the
-`requirements.txt` comments on why floor/unpinned versions were chosen after
-several rounds of exactly this class of breakage). It may work on a
-different day (pip resolving a different version combination) or a
-different Colab image — if you want to try it: set `model.backend: unsloth`,
-re-run Section 2 (Install) then Section 3 onward, and **start with a small
-`data.max_train_samples` smoke test** before trusting it with a full run. If
-it fails, `load_base_model_for_backend()` raises an actionable `RuntimeError`
-telling you to flip back to `transformers` — the plain path is fully
-preserved, not deleted, and needs no other code changes to resume.
+**`unsloth` hit a real failure on one Colab image**, and it's worth
+understanding exactly what kind before trusting it again: `from unsloth
+import FastModel` raised `NameError: name 'auto_docstring' is not defined`
+inside unsloth's own `models/_utils.py`, which does `exec()`-based
+monkeypatching of transformers internals — its patches didn't match the
+installed transformers release. This is a **known, actively-fixed class of
+bug upstream**, not a dead end: transformers periodically renames internal
+symbols as it evolves, which breaks unsloth's exec()-based patching until
+the maintainers ship a matching fix — see
+[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415)
+for a near-identical case (`PreTrainedConfig` renamed to `PretrainedConfig`),
+fixed via companion PRs across **two** packages, `unsloth` and `unsloth_zoo`.
+`requirements.txt` lists both explicitly, unpinned, specifically so
+`pip install --upgrade` (Section 2) always has a chance to pick up the
+current fix for whatever transformers happens to be installed — pinning
+either package to a specific version here would just recreate the same
+problem on a future transformers release.
+
+**Practical takeaway:** re-run Section 2 (Install) to fetch the latest
+`unsloth`/`unsloth_zoo`, then retry from Section 3. If it still fails,
+`load_base_model_for_backend()` raises an actionable `RuntimeError` — set
+`model.backend: transformers` and re-run; the plain path is fully preserved,
+not deleted, and needs no other code changes to resume. Either way, **start
+with a small `data.max_train_samples` smoke test** before trusting a full
+run — this backend has not been validated end-to-end by this project (no
+GPU available during development).
 
 Implementation notes, if you're reading the code:
 - `model.load_base_model_for_backend()` / `model.attach_lora_for_backend()`
@@ -392,17 +401,19 @@ automatically before raising.
 
 **`NameError: name 'auto_docstring' is not defined`** (or any other
 non-`ImportError` exception) **while loading `model.backend: unsloth`.**
-Confirmed real, not hypothetical: `unsloth/models/_utils.py` does
-`exec()`-based monkeypatching of transformers internals at import time, and
-when its patches don't match the installed transformers release, it can
-raise almost any exception type from inside that `exec()` call — not a clean
-`ImportError`. `load_base_model_for_backend()` catches this broadly (not
-just `ImportError`) and re-raises an actionable `RuntimeError`. The fix is
-the same either way: set `model.backend: transformers` in
-`configs/experiment.yaml` (now the default) and re-run from Section 3 — this
-is an unsloth/transformers version-compatibility problem on Unsloth's side,
-not something to chase further from this project's code without hand-pinning
-exact matching versions of both, which this project deliberately avoids.
+`unsloth/models/_utils.py` does `exec()`-based monkeypatching of
+transformers internals at import time, and when its patches don't match the
+installed transformers release, it can raise almost any exception type from
+inside that `exec()` call — not a clean `ImportError`.
+`load_base_model_for_backend()` catches this broadly (not just
+`ImportError`) and re-raises an actionable `RuntimeError`. This is a known,
+actively-fixed class of bug upstream (see "Model backend" above and
+[unslothai/unsloth#3415](https://github.com/unslothai/unsloth/issues/3415))
+— **first try re-running Section 2 (Install)** to fetch a newer
+`unsloth`/`unsloth_zoo` that may already contain the fix. If it's still
+broken after that, set `model.backend: transformers` in
+`configs/experiment.yaml` and re-run from Section 3 as the reliable
+fallback.
 
 **`OutOfMemoryError: CUDA out of memory` during Section 9 (Train), even on
 A100 40GB.**

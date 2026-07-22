@@ -54,11 +54,13 @@ class ModelConfig:
     hf_token_env_var: str = "HF_TOKEN"
     attn_implementation: str = "auto"
     torch_dtype: str = "bfloat16"
-    backend: str = "transformers"  # "unsloth" | "transformers" — see model.py. "transformers" is the
-                                    # proven-working default; "unsloth" is experimental (confirmed to
-                                    # fail on at least one Colab image with a NameError inside its own
-                                    # transformers-monkeypatching code — an unsloth/transformers version
-                                    # mismatch, not something this project's code can fix directly)
+    backend: str = "unsloth"  # "unsloth" | "transformers" — see model.py. unsloth typically uses much
+                               # less VRAM for QLoRA. It hit a NameError on one Colab image from its
+                               # exec()-based transformers-monkeypatching (a known, actively-fixed class
+                               # of bug upstream — github.com/unslothai/unsloth/issues/3415); requirements.txt
+                               # pulls both unsloth and unsloth_zoo unpinned so `pip install --upgrade`
+                               # picks up the fix. "transformers" remains the proven-working fallback if
+                               # it's still broken after that.
 
 
 @dataclass

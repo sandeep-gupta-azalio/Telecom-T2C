@@ -46,13 +46,26 @@ accelerate>=1.2.0
 # floor-only above: it needs to resolve a version that's actually compatible
 # with whatever transformers/peft/trl/torch/CUDA Colab has *today*, and
 # Unsloth's own installer explicitly recommends auto-detection
-# (`--torch-backend=auto`) over manual pinning for this reason. This backend
-# is NOT validated on real hardware by this project (no GPU available during
-# development) — start with a small data.max_train_samples smoke test before
-# a full run, same practice already established for the transformers
-# backend. If it hits its own environment/compatibility issues, set
+# (`--torch-backend=auto`) over manual pinning for this reason.
+#
+# unsloth_zoo is listed explicitly too, not left to resolve transitively:
+# unsloth's own exec()-based patching of transformers internals periodically
+# breaks when transformers renames something internal (confirmed pattern —
+# see https://github.com/unslothai/unsloth/issues/3415, a near-identical
+# NameError to one hit during this project's development), and the
+# maintainers' fix for that exact class of bug has historically landed as
+# companion PRs across BOTH unsloth and unsloth_zoo. Leaving unsloth_zoo
+# unlisted would let it resolve independently and possibly miss the paired
+# fix even when `unsloth` itself is current.
+#
+# This backend is NOT validated end-to-end on real hardware by this project
+# (no GPU available during development) — start with a small
+# data.max_train_samples smoke test before a full run, same practice already
+# established for the transformers backend. If it still hits a compatibility
+# error after re-running Section 2 (Install) with --upgrade, set
 # model.backend: transformers in configs/experiment.yaml to fall back to the
 # proven-working path without needing to touch this file.
+unsloth_zoo
 unsloth
 
 # torch is intentionally NOT pinned/listed here at all — this is the fix for
