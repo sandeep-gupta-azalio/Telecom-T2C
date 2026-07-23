@@ -162,12 +162,29 @@ def train(
         sample_fn=_sample_fn, decode_fn=inference.generate, eval_available=eval_available,
     )
 
+    # `tokenizer` here is actually Unsloth's returned Gemma4UnifiedProcessor
+    # (Gemma 4 is nominally multimodal — see inference.py's docstring for the
+    # same fact biting a different bug). Passing a `ProcessorMixin` as
+    # `processing_class` makes TRL's SFTTrainer set `self._is_vlm = True`
+    # (isinstance-based, unconditional — see trl/trainer/sft_trainer.py),
+    # which hard-blocks BOTH `packing` and `assistant_only_loss` with a
+    # `ValueError` regardless of whether the dataset is actually
+    # multimodal — confirmed by reading TRL's source directly. This project
+    # never trains on images/audio/video, so passing the *inner* plain
+    # tokenizer instead (TRL's own code does `processing_class.tokenizer`
+    # internally for exactly this reason — every ProcessorMixin has one)
+    # avoids VLM mode entirely, letting both packing and assistant_only_loss
+    # work as intended. tokenizer.patch_chat_template_for_assistant_masking()
+    # already patches this inner tokenizer's chat_template too (see its
+    # docstring), so the chat template stays consistent either way.
+    processing_class = getattr(tokenizer, "tokenizer", tokenizer)
+
     sft_trainer = SFTTrainer(
         model=peft_model,
         args=sft_config,
         train_dataset=train_ds,
         eval_dataset=eval_dataset,
-        processing_class=tokenizer,
+        processing_class=processing_class,
         callbacks=callbacks,
     )
 

@@ -138,3 +138,34 @@ class TestPatchChatTemplateForAssistantMasking:
         tok = _FakeTokenizerWithTemplate("some unrelated template with no matching anchor")
         with pytest.raises(RuntimeError, match="chat_template.jinja structure may have changed"):
             patch_chat_template_for_assistant_masking(tok)
+
+    def test_patches_both_outer_processor_and_inner_tokenizer_independently(self):
+        # Mirrors the REAL google/gemma-4-12B-it structure, confirmed by
+        # loading the actual AutoProcessor locally: the outer processor and
+        # its .tokenizer are separate objects with separate (but
+        # content-equal) chat_template strings — patching only the outer
+        # object would leave the inner one broken, which matters because
+        # trainer.train() passes the INNER tokenizer to SFTTrainer (see its
+        # docstring) to avoid TRL's VLM detection.
+        template = "before {{- captured_content -}} after"
+        inner = _FakeTokenizerWithTemplate(template)
+        outer = _FakeTokenizerWithTemplate(template)
+        outer.tokenizer = inner
+
+        patch_chat_template_for_assistant_masking(outer)
+
+        assert "{% generation %}" in outer.chat_template
+        assert "{% generation %}" in inner.chat_template
+        # Independent copies — confirm neither patch call accidentally
+        # aliased the other's string.
+        assert outer.chat_template == inner.chat_template
+
+    def test_noop_when_inner_tokenizer_is_outer_itself(self):
+        # Some tokenizer-like objects have a `.tokenizer` attribute that
+        # points back at themselves (or don't have one at all) — must not
+        # double-patch or infinite-loop.
+        template = "before {{- captured_content -}} after"
+        tok = _FakeTokenizerWithTemplate(template)
+        tok.tokenizer = tok
+        patch_chat_template_for_assistant_masking(tok)
+        assert tok.chat_template.count("{% generation %}") == 1

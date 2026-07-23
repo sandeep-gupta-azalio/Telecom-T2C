@@ -107,32 +107,55 @@ def patch_chat_template_for_assistant_masking(tokenizer: Any) -> None:
     per-turn assistant token spans decoding back to exactly the PASS_0-4
     content) before this was wired into training.
 
+    Patches BOTH `tokenizer` itself and `tokenizer.tokenizer` (if present)
+    independently: `tokenizer` here is actually Unsloth's returned
+    Gemma4UnifiedProcessor (Gemma 4 is nominally multimodal), and
+    trainer.train() passes its *inner* plain tokenizer
+    (`tokenizer.tokenizer`) to SFTTrainer instead of the full processor —
+    see that module's docstring for why (TRL's `_is_vlm` detection, keyed
+    off `isinstance(processing_class, ProcessorMixin)`, hard-blocks
+    `packing`/`assistant_only_loss` for processor-based processing_class).
+    Whichever object actually carries a `chat_template` gets patched; an
+    object with no template at all is silently skipped (normal — not every
+    layer necessarily carries its own copy), but an object whose template
+    exists yet doesn't contain the expected anchor still raises, since that
+    specifically signals a real structural mismatch worth flagging.
+
     Raises RuntimeError if the exact anchor text isn't found — e.g. if
     Google revises the template's structure upstream — rather than silently
     no-op'ing and leaving assistant_only_loss broken without any signal.
     Idempotent: no-ops if the template already has `{% generation %}`
     (covers a future template that ships this natively).
     """
-    template = getattr(tokenizer, "chat_template", None)
-    if not template:
-        return
-    if "{% generation %}" in template:
-        return
+    targets = [tokenizer]
+    inner = getattr(tokenizer, "tokenizer", None)
+    if inner is not None and inner is not tokenizer:
+        targets.append(inner)
 
-    if _GENERATION_MARKER_ANCHOR not in template:
-        raise RuntimeError(
-            "Could not find the expected assistant-content anchor "
-            f"({_GENERATION_MARKER_ANCHOR!r}) in the tokenizer's chat_template — "
-            "google/gemma-4-12B-it's chat_template.jinja structure may have "
-            "changed upstream. patch_chat_template_for_assistant_masking() needs "
-            "updating to match the new template before assistant_only_loss=True "
-            "can work; until then, either fix this patch or set "
-            "training.assistant_only_loss: false (if exposed) / remove "
-            "assistant_only_loss=True from trainer.build_sft_config()."
+    for target in targets:
+        template = getattr(target, "chat_template", None)
+        if not template:
+            continue
+        if "{% generation %}" in template:
+            continue
+
+        if _GENERATION_MARKER_ANCHOR not in template:
+            raise RuntimeError(
+                "Could not find the expected assistant-content anchor "
+                f"({_GENERATION_MARKER_ANCHOR!r}) in {type(target).__name__}'s "
+                "chat_template — google/gemma-4-12B-it's chat_template.jinja "
+                "structure may have changed upstream. "
+                "patch_chat_template_for_assistant_masking() needs updating to "
+                "match the new template before assistant_only_loss=True can work; "
+                "until then, either fix this patch or remove "
+                "assistant_only_loss=True from trainer.build_sft_config()."
+            )
+
+        target.chat_template = template.replace(_GENERATION_MARKER_ANCHOR, _GENERATION_MARKER_REPLACEMENT, 1)
+        logger.info(
+            "Patched %s's chat template with generation markers for assistant-only-loss masking.",
+            type(target).__name__,
         )
-
-    tokenizer.chat_template = template.replace(_GENERATION_MARKER_ANCHOR, _GENERATION_MARKER_REPLACEMENT, 1)
-    logger.info("Patched chat template with generation markers for assistant-only-loss masking.")
 
 
 def resolve_hf_token(env_var_name: str = "HF_TOKEN") -> Optional[str]:

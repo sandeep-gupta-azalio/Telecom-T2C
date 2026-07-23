@@ -198,6 +198,26 @@ Implementation notes, if you're reading the code:
   conversational-format auto-detection to kick in at all. See
   Troubleshooting if the patch ever raises (e.g. Google revises the
   template upstream).
+- `trainer.train()` passes `getattr(tokenizer, "tokenizer", tokenizer)` —
+  Unsloth's returned `tokenizer` is actually a `Gemma4UnifiedProcessor`
+  (Gemma 4 is nominally multimodal — see `inference.py`'s docstring for a
+  different bug from the same root fact) — as `processing_class` to
+  `SFTTrainer`, not the full processor. Confirmed directly by reading TRL's
+  source: it sets `self._is_vlm = True` whenever `isinstance(processing_class,
+  ProcessorMixin)`, *unconditionally* (regardless of whether the dataset
+  actually contains any images/audio/video), and hard-blocks `packing`,
+  `padding_free`, **and** `assistant_only_loss` for VLM mode with a
+  `ValueError`. This project never trains on anything but text, so passing
+  the processor's own inner tokenizer (confirmed via `AutoProcessor`
+  locally: `processor.tokenizer` exists, is a plain `PreTrainedTokenizerBase`
+  subclass, not a `ProcessorMixin`) avoids VLM mode entirely — verified
+  locally end-to-end (real downloaded `Gemma4UnifiedProcessor`, correct
+  `_is_vlm`-relevant `isinstance` result, non-zero `assistant_masks` from
+  the inner tokenizer's own `apply_chat_template`). Also confirmed the
+  outer processor and its inner tokenizer carry **separate** `chat_template`
+  strings (`proc.chat_template is not proc.tokenizer.chat_template`), which
+  is why `patch_chat_template_for_assistant_masking()` patches both
+  independently rather than assuming one covers the other.
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -788,6 +808,28 @@ non-zero, correctly-positioned spans. As a temporary unblock, remove
 `model.load_base_model()` to fall back to loss-over-the-whole-conversation
 (the previous behavior) until the patch is updated.
 
+**`ValueError: Assistant-only loss is not yet supported for
+vision-language models. Please set 'assistant_only_loss=False' in the
+'SFTConfig'.`** during Section 9 (Train), inside `SFTTrainer.__init__`.
+Confirmed by reading TRL's source directly: `SFTTrainer` sets
+`self._is_vlm = True` whenever `isinstance(processing_class, ProcessorMixin)`
+— unconditionally, regardless of whether the dataset actually has any
+images/audio/video — and hard-blocks `assistant_only_loss` (and separately,
+`packing` and `padding_free`) in that mode. Unsloth's returned `tokenizer`
+for Gemma 4 is a genuine `Gemma4UnifiedProcessor` (`ProcessorMixin`
+subclass), since the model is nominally multimodal, which is exactly what
+trips this. Fixed in `trainer.train()`: it now passes
+`getattr(tokenizer, "tokenizer", tokenizer)` — the processor's own inner,
+plain-text tokenizer — as `processing_class` instead of the full processor,
+which this project's data (always text-only) never actually needs. If
+you're on an older clone still passing the full `tokenizer` directly to
+`SFTTrainer`, `git pull`. Note `patch_chat_template_for_assistant_masking()`
+patches *both* the outer processor and its inner tokenizer independently
+(confirmed locally: they carry separate `chat_template` strings, not a
+shared reference) specifically so this fix doesn't silently lose the
+generation-marker patch by switching which object gets passed to
+`SFTTrainer`.
+
 **`continue_adapter` path not found.**
 `config.validate_config()` prints a warning at Configuration time (Section
 3) if the path doesn't exist yet — this is expected if you haven't uploaded
@@ -891,12 +933,17 @@ with — see "Model backend" above for why this patch exists), and
 `patch_chat_template_for_assistant_masking()` (asserts the `{% generation %}`
 marker gets correctly inserted around a fake template's assistant-content
 anchor, is a no-op when the marker is already present or no template is
-set, and raises `RuntimeError` when the anchor is missing — these test the
-string-replacement logic in isolation; the actual Jinja rendering
-correctness against the real `google/gemma-4-12B-it` template was verified
-separately, offline, before this was wired into training: byte-identical
-rendered text before/after patching, and `return_assistant_tokens_mask=True`
-producing per-turn spans that decode back to exactly the PASS_0-4 assistant
+set, raises `RuntimeError` when the anchor is missing, and — mirroring the
+real `google/gemma-4-12B-it` processor structure confirmed by loading it
+locally — patches an outer processor-like object and its separate
+`.tokenizer` independently rather than assuming one covers the other;
+these test the string-replacement logic in isolation. The actual Jinja
+rendering correctness against the real `google/gemma-4-12B-it` template,
+and the fact that passing its inner tokenizer as `processing_class` avoids
+TRL's VLM detection, were both verified separately, offline, before this
+was wired into training: byte-identical rendered text before/after
+patching, and `return_assistant_tokens_mask=True` producing per-turn spans
+that decode back to exactly the PASS_0-4 assistant
 content). Tests requiring an unavailable package (e.g. `trl`/`torch` if not
 installed locally) skip cleanly rather than failing. Unsloth's actual model
 loading (`model.load_base_model`, `model.attach_lora`) is not covered by
