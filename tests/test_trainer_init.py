@@ -79,22 +79,29 @@ class TestBuildSftConfig:
         assert sft_config.gradient_checkpointing_kwargs is None
 
     def test_packing_strategy_is_wrapped_not_bfd(self, tmp_path):
-        # TRL unconditionally forces padding_free=True whenever packing=True
-        # and packing_strategy=="bfd" (confirmed directly in
-        # trl/trainer/sft_trainer.py), and padding_free requires
-        # FlashAttention 2/3 — this project runs on Unsloth's xformers-based
-        # attention kernels instead, which surfaced as
-        # `ValueError: When padding_free=True without packing, max_length is
-        # not enforced...` once assistant_only_loss's conversational dataset
-        # path was wired in. "wrapped" packing doesn't have this auto-enable
-        # behavior — reproduced locally: constructing a real SFTConfig with
-        # packing_strategy="bfd" computes padding_free=True via TRL's own
-        # `args.padding_free or (args.packing and args.packing_strategy ==
-        # "bfd")` formula; "wrapped" computes False.
+        # "bfd"/"bfd_split" packing without a supported FlashAttention
+        # variant risks real cross-contamination between packed examples —
+        # confirmed directly in the actual generated
+        # unsloth_compiled_cache/UnslothSFTTrainer.py (pasted back by the
+        # user, not the plain pip trl package), which warns about exactly
+        # this. This project runs on Unsloth's xformers-based attention
+        # kernels, not FlashAttention 2/3 — "wrapped" avoids the risk.
         config = _config()
         sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=True)
         assert sft_config.packing_strategy == "wrapped"
-        computed_padding_free = sft_config.padding_free or (
-            sft_config.packing and sft_config.packing_strategy == "bfd"
-        )
-        assert computed_padding_free is False
+
+    def test_padding_free_explicitly_false(self, tmp_path):
+        # Confirmed directly in the actual generated
+        # unsloth_compiled_cache/UnslothSFTTrainer.py (pasted back by the
+        # user): `self.padding_free = args.padding_free or (args.packing and
+        # args.packing_strategy in {"bfd", "bfd_split"})`. Even with
+        # packing_strategy="wrapped" (making the OR's second term False),
+        # `ValueError: When padding_free=True without packing, max_length is
+        # not enforced...` still reproduced — meaning args.padding_free
+        # itself was already truthy before this ran, evidently injected by
+        # Unsloth's own new_init wrapper (unsloth/trainer.py) regardless of
+        # packing_strategy. Explicitly setting padding_free=False overrides
+        # whatever default gets injected.
+        config = _config()
+        sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=True)
+        assert sft_config.padding_free is False

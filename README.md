@@ -201,15 +201,21 @@ Implementation notes, if you're reading the code:
   inserts one around exactly the assistant-content span (byte-identical
   rendered text, correct per-turn token spans, verified locally against the
   real tokenizer both before and after switching which object gets passed
-  to `SFTTrainer`). But combining it with `packing=True` hit a confirmed,
-  reproduced crash inside Unsloth's *compiled* `SFTTrainer` cache
-  (`ValueError: When padding_free=True without packing, max_length is not
-  enforced...`) that persisted across multiple independent fix attempts and
-  couldn't be resolved without GPU access to test against. Packing matters
-  more for training cost/speed than assistant-only-loss matters for
-  training quality, so packing won — `patch_chat_template_for_assistant_masking()`
-  is left in place, tested, and ready to re-enable once this is resolved
-  upstream; see Troubleshooting for the full incident and
+  to `SFTTrainer`). Combining it with `packing=True` hit a
+  `ValueError: When padding_free=True without packing, max_length is not
+  enforced...` crash, which was initially (incorrectly) attributed to the
+  assistant-only-loss + conversational-dataset combination specifically —
+  it was reverted on that assumption. **That diagnosis was wrong**: the
+  same crash recurred afterward with `assistant_only_loss` fully reverted
+  (flattened `text` dataset, no conversational format at all), proving the
+  real cause was unrelated to it — see the `padding_free` entry in
+  Troubleshooting and the bullet below for the actual root cause and fix
+  (an explicit `padding_free=False`, since Unsloth's own wrapper injects a
+  default of `True` regardless of dataset format). `assistant_only_loss`
+  is not re-enabled by this discovery — it stays off for now simply
+  because it hasn't been re-tried since the real fix landed, not because
+  of any remaining known incompatibility. `patch_chat_template_for_assistant_masking()`
+  is left in place, tested, and ready for that retry; see
   `trainer.py`'s module docstring for where to pick it back up.
 - `trainer.train()` passes `getattr(tokenizer, "tokenizer", tokenizer)` —
   Unsloth's returned `tokenizer` is actually a `Gemma4UnifiedProcessor`
@@ -227,14 +233,21 @@ Implementation notes, if you're reading the code:
   after reverting `assistant_only_loss`, since it's independently correct
   and harmless either way.
 - `trainer.build_sft_config()` sets `packing_strategy="wrapped"` (not
-  `SFTConfig`'s default `"bfd"`) — `"bfd"` unconditionally forces
-  `padding_free=True` whenever `packing=True` (confirmed in TRL's source),
-  and `padding_free` requires FlashAttention 2/3, which this project
-  doesn't use (Unsloth's xformers-based kernels instead — confirmed via
-  Section 7's load banner). Kept as a defensive default even after
-  reverting `assistant_only_loss`, since this specific auto-enable is
-  triggered by `packing`+`"bfd"` alone. See Troubleshooting for the exact
-  crash this avoids.
+  `SFTConfig`'s default `"bfd"`) and explicitly `padding_free=False`.
+  Confirmed directly against the actual generated
+  `unsloth_compiled_cache/UnslothSFTTrainer.py` (not just the plain `trl`
+  package — see Troubleshooting for why that distinction mattered here):
+  `"bfd"`/`"bfd_split"` packing without a supported FlashAttention variant
+  risks real cross-contamination between packed examples (this project
+  uses Unsloth's xformers-based kernels, not FA2/3 — confirmed via
+  Section 7's load banner), which `"wrapped"` avoids. Separately, Unsloth's
+  own `new_init` wrapper evidently injects `padding_free=True` onto the
+  config by default regardless of `packing_strategy` — reproduced with
+  `packing_strategy="wrapped"` alone still raising
+  `ValueError: When padding_free=True without packing, max_length is not
+  enforced...`; setting `padding_free=False` explicitly overrides it. See
+  Troubleshooting for the full incident, including an earlier, incorrect
+  diagnosis that blamed this on `assistant_only_loss` specifically.
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -801,12 +814,15 @@ explicit decimal point (`1.0e-4`) or plain decimal (`0.0001`) instead of
 bare scientific notation.
 
 **Re-enabling `assistant_only_loss=True` (not the current default —
-see "Model backend"): three errors/warnings to expect, in the order
+see "Model backend"): two errors/a warning to expect, in the order
 you'll likely hit them.** This project tried
-`SFTConfig(assistant_only_loss=True)` together with `packing=True` and
-reverted it after a confirmed, unresolved crash — the entries below are
-kept for whoever picks this back up, not because they occur with the
-current default config.
+`SFTConfig(assistant_only_loss=True)` and reverted it, initially believing
+it was incompatible with `packing=True` — **that diagnosis turned out to
+be wrong** (see the standalone `padding_free` entry below for the actual,
+unrelated root cause and fix, which is now in place regardless of
+`assistant_only_loss`). It hasn't been re-tried since that fix landed, so
+it's still off by default, but there's no known remaining reason it
+wouldn't work now. The entries below are kept for whoever retries it:
 1. **`RuntimeError: Could not find the expected assistant-content
    anchor...`** from `tokenizer.patch_chat_template_for_assistant_masking()`,
    during Section 7 (Load Model). Means `google/gemma-4-12B-it`'s
@@ -841,49 +857,58 @@ current default config.
    locally: they carry separate `chat_template` strings, not a shared
    reference), so re-enabling `assistant_only_loss` won't silently lose the
    generation-marker patch.
-3. **`ValueError: When padding_free=True without packing, max_length is
-   not enforced...`** during Section 9 (Train), inside
-   `SFTTrainer.__init__` (surfaces through Unsloth's compiled
-   `UnslothSFTTrainer.__init__`) — **this is the one that was never
-   resolved.** It persisted even after fixes #1 and #2 above, and even
-   after setting `packing_strategy="wrapped"` (which reliably avoids the
-   *documented* TRL mechanism for this exact error — see the next entry —
-   but did not avoid it here). Something inside Unsloth's own *compiled*
-   `UnslothSFTTrainer.__init__` — not the plain `trl` package installed
-   locally, which was used to verify every other fix in this section —
-   ends up with `self.padding_free=True` and `args.packing=False`
-   simultaneously when `assistant_only_loss=True` and `packing=True` are
-   combined with a conversational (`messages`-column) dataset, and that
-   compiled file is regenerated per-run/per-model, not fetchable from
-   GitHub for offline inspection. This is where debugging stopped — it
-   needs either a live GPU session to trace further, or an upstream
-   Unsloth fix. Until then, `packing` and `assistant_only_loss` are
-   mutually exclusive in this project: pick one (see "Model backend").
 
 **`ValueError: When padding_free=True without packing, max_length is not
 enforced. Either enable packing..., provide already truncated inputs, or
 set max_length=None.`** during Section 9 (Train), inside
 `SFTTrainer.__init__` (surfaces through Unsloth's compiled
 `UnslothSFTTrainer.__init__`).
-Confirmed directly in `trl/trainer/sft_trainer.py`: TRL unconditionally
-computes `self.padding_free = args.padding_free or (args.packing and
-args.packing_strategy == "bfd")` — meaning `packing=True` with
-`SFTConfig`'s *default* `packing_strategy="bfd"` force-enables
-`padding_free` regardless of what this project sets for `padding_free`
-itself. `padding_free` only works with FlashAttention 2/3, per TRL's own
-docs — but this project runs on Unsloth's xformers-based attention
-kernels (confirmed via Section 7's load banner printing `FA2 = False`),
-not FA2. `trainer.build_sft_config()` now sets `packing_strategy="wrapped"`
-instead of the default `"bfd"` — reproduced locally: constructing a real
-`SFTConfig` with `packing_strategy="bfd"` computes `padding_free=True` via
-TRL's own formula above; `"wrapped"` computes `False`. Tradeoff: `"wrapped"`
-packing can occasionally cut an example across a pack boundary (vs.
-`"bfd"`'s more careful bin-packing) — a minor quality cost given most
-conversations here are well under `max_seq_length`, versus a hard crash.
-If you're on an older clone still hitting this, `git pull`.
+**This was initially misdiagnosed** as specific to combining
+`assistant_only_loss=True` with `packing=True` on a conversational
+(`messages`-column) dataset, and `assistant_only_loss` was reverted on
+that basis — but the identical crash then recurred with
+`assistant_only_loss` fully reverted (flattened `text` dataset, no
+conversational format at all), proving the real cause was something else
+entirely. The actual mechanism, confirmed by asking for and reading the
+literal contents of `unsloth_compiled_cache/UnslothSFTTrainer.py` (not the
+plain pip-installed `trl` package, which computes this differently —
+see below) around its `self.padding_free = args.padding_free or
+(args.packing and args.packing_strategy in {"bfd", "bfd_split"})` line:
+even with `packing_strategy="wrapped"` (which makes that `or`'s second
+term `False`), the crash still reproduced — meaning `args.padding_free`
+itself was already truthy *before* this line ever ran. Unsloth's own
+`new_init` wrapper (`unsloth/trainer.py`) evidently injects a default of
+`padding_free=True` onto the config regardless of `packing_strategy` or
+dataset format. `trainer.build_sft_config()` now sets `padding_free=False`
+explicitly, which overrides whatever default gets injected — confirmed by
+constructing a real `SFTConfig` locally with this exact combination and
+reading back `.padding_free`.
 
-(A fourth thing you'd see if `assistant_only_loss` gets past all three
-above: `WARNING:trl.trainer.sft_trainer:[RANK 0] The chat template does
+(The plain, pip-installed `trl` package's own `sft_trainer.py` computes
+`self.padding_free = args.padding_free or (args.packing and
+args.packing_strategy == "bfd")` — a single string check, no `"bfd_split"`,
+and no wrapper-injected default. That formula alone was used to (correctly,
+as far as it went) verify the `packing_strategy="wrapped"` fix in isolation,
+but it doesn't fully describe what Unsloth's own generated, per-run
+compiled trainer actually does — which is why that first fix didn't hold
+and why `padding_free=False` had to be set explicitly instead of relying
+on `packing_strategy` alone.)
+
+Separately, `"bfd"`/`"bfd_split"` packing without a supported FlashAttention
+variant risks real cross-contamination between packed examples (confirmed
+in that same compiled file's own warning text) — this project uses
+Unsloth's xformers-based attention kernels, not FA2/3 (confirmed via
+Section 7's load banner printing `FA2 = False`), so `packing_strategy="wrapped"`
+(not the default `"bfd"`) is kept regardless of the `padding_free` fix
+above. Tradeoff: `"wrapped"` packing can occasionally cut an example across
+a pack boundary (vs. `"bfd"`'s more careful bin-packing) — a minor quality
+cost given most conversations here are well under `max_seq_length`, versus
+a real correctness risk. If you're on an older clone still hitting this,
+`git pull`.
+
+(One more thing you'd see if `assistant_only_loss` gets re-enabled and past
+both numbered items above:
+`WARNING:trl.trainer.sft_trainer:[RANK 0] The chat template does
 not include the assistant turn's end-of-turn token in the loss mask; the
 model may not learn to stop.` — not an error, and an already-known,
 deliberate tradeoff: `patch_chat_template_for_assistant_masking()`'s
