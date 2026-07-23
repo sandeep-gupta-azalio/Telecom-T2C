@@ -39,8 +39,27 @@ class EvalResult:
 
 
 def evaluate_validation(trainer: Any) -> dict[str, float]:
-    """Thin wrapper around SFTTrainer.evaluate()."""
-    return trainer.evaluate()
+    """Thin wrapper around SFTTrainer.evaluate().
+
+    Forces eager (non-compiled) execution for the duration of this call via
+    torch.compiler.set_stance("force_eager") — training itself keeps
+    Unsloth's full torch.compile-based speedup (a large fraction of its
+    advertised "2x faster" claim), since this context manager only affects
+    code within its scope. This works around a confirmed, reproduced crash
+    (`InternalTorchDynamoError: AcceleratorError: CUDA error: an illegal
+    memory access was encountered`) inside dynamo's tracing of Unsloth's
+    compiled Gemma4UnifiedTextAttention/RMSNorm forward specifically during
+    evaluate() — training completed successfully with compilation enabled
+    before this crash was ever hit, so the instability appears scoped to
+    eval mode, not compilation in general (see README Troubleshooting).
+    Deliberately NOT using torch.compiler.disable() here: it's documented as
+    unreliable as a context manager (pytorch/pytorch#123771); set_stance is
+    the stable, confirmed-working API for this.
+    """
+    import torch
+
+    with torch.compiler.set_stance("force_eager"):
+        return trainer.evaluate()
 
 
 def parse_pass4_envelope(text: str) -> Optional[dict[str, Any]]:

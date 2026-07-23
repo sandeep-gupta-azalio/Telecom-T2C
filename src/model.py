@@ -107,25 +107,20 @@ def load_base_model(
     this point forward, not a separately-loaded one (see notebook Section 7,
     which reassigns its `tokenizer` variable to this return value).
     """
-    # Must be set before importing unsloth below: this is Unsloth's own
-    # documented escape hatch (UNSLOTH_COMPILE_DISABLE) for disabling their
-    # torch.compile/dynamo-based auto-compiler. Defaulted to disabled here
-    # because gemma4_unified is an extremely new addition to Unsloth (its
-    # architecture shares KV state across layers — Gemma 4's
-    # num_kv_shared_layers design — and there is a confirmed, separate
-    # upstream bug class where use_cache=False, which training with
-    # gradient checkpointing forces, causes those KV-shared layers to
-    # recompute incorrectly; serious enough that Unsloth shipped a full
-    # re-release over it, not just a patch). This project hit a concrete,
-    # reproduced symptom of instability in this compiled path: `Internal
-    # TorchDynamoError: AcceleratorError: CUDA error: an illegal memory
-    # access was encountered` during Section 10 (Evaluate), surfacing
-    # inside dynamo's own tracing of Unsloth's compiled
-    # Gemma4UnifiedTextAttention/RMSNorm forward. Disabling the compiler
-    # trades some speed for correctness/stability on this very new,
-    # actively-changing model family — setdefault so an explicit override
-    # (e.g. once Unsloth confirms this is fixed) is respected.
-    os.environ.setdefault("UNSLOTH_COMPILE_DISABLE", "1")
+    # NOTE: an earlier version of this function unconditionally set
+    # UNSLOTH_COMPILE_DISABLE=1 here to work around a confirmed CUDA
+    # illegal-memory-access crash inside dynamo's tracing of Unsloth's
+    # compiled Gemma4UnifiedTextAttention/RMSNorm forward. That crash only
+    # ever reproduced during evaluate() (training itself completed
+    # successfully with compilation enabled beforehand) — disabling
+    # compilation globally here was fixing eval stability at the cost of
+    # roughly half of Unsloth's advertised training speedup for the entire
+    # multi-hour training run, not just the brief eval passes. The fix now
+    # lives narrowly in evaluator.evaluate_validation() instead
+    # (torch.compiler.set_stance("force_eager"), scoped to just that call),
+    # so training here keeps Unsloth's full compiled-kernel speed. See
+    # README Troubleshooting for the crash this avoids and why the fix
+    # moved.
 
     # Must run before importing unsloth below: unsloth_zoo's own import chain
     # (via transformers.processing_utils.Unpack -> modeling_utils ->

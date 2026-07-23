@@ -157,12 +157,16 @@ Implementation notes, if you're reading the code:
   quantization). This is a second line of defense on top of, not a
   replacement for, Section 2's own torchaudio uninstall / torchao version
   floor — see Troubleshooting for the full incident history behind both.
-- `model.load_base_model()` sets `UNSLOTH_COMPILE_DISABLE=1` (Unsloth's own
-  documented flag) before importing Unsloth, disabling their
-  `torch.compile`/dynamo-based auto-compiler by default — a deliberate
-  stability-over-speed tradeoff given `gemma4_unified`'s custom-compiled
-  attention/RMSNorm modules are extremely new; see Troubleshooting's
-  `InternalTorchDynamoError` entry for the reproduced crash this avoids.
+- `evaluator.evaluate_validation()` wraps `trainer.evaluate()` in
+  `torch.compiler.set_stance("force_eager")`, forcing eager (non-compiled)
+  execution only for that call — training keeps Unsloth's full
+  `torch.compile`-based speed, since `gemma4_unified`'s compiled
+  attention/RMSNorm modules were confirmed stable during training but not
+  during `evaluate()` specifically; see Troubleshooting's
+  `InternalTorchDynamoError` entry for the reproduced crash this avoids
+  (and why an earlier version of this project instead disabled compilation
+  globally via `UNSLOTH_COMPILE_DISABLE`, unnecessarily costing training
+  speed too).
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -636,20 +640,34 @@ about Unsloth's own bleeding-edge Gemma 4 support:
    incorrectly instead of reusing cached state; serious enough that Unsloth
    shipped a full re-release over it rather than a patch.
 
-`model.load_base_model()` now sets `UNSLOTH_COMPILE_DISABLE=1` (Unsloth's
-own documented environment flag) before importing Unsloth, trading some
-speed for correctness/stability on this very new, actively-changing model
-family until Unsloth's compiled Gemma-4-12B path is better proven. If
-you're on an older copy of this repo without that line, `git pull`. If you
-still hit this crash even with compilation disabled: **once "illegal
-memory access" occurs, the CUDA context for the rest of that kernel process
-should be considered corrupted** — `Runtime -> Restart session` (not just
+`evaluator.evaluate_validation()` wraps `trainer.evaluate()` in
+`torch.compiler.set_stance("force_eager")` (a stable PyTorch API,
+confirmed to work as a context manager — unlike `torch.compiler.disable()`,
+which has a documented bug making it unreliable as one:
+[pytorch/pytorch#123771](https://github.com/pytorch/pytorch/issues/123771)),
+forcing eager execution for just that call. Training completed successfully
+with compilation enabled *before* this crash was ever hit, so the
+instability appears scoped to eval mode specifically, not compilation in
+general — this fix is deliberately narrow: it costs nothing during
+training, where Unsloth's compiled kernels are most of its advertised "2x
+faster" speedup and matter most given multi-hour run times. (An earlier
+version of this project instead disabled compilation globally via
+`UNSLOTH_COMPILE_DISABLE=1` in `model.load_base_model()` — fixing eval
+stability the same way, but at the cost of roughly halving training
+throughput for the *entire* run just to make brief periodic eval passes
+safe. If you're chasing an unexpectedly slow training run, check you're on
+a commit with the scoped fix, not the blanket one.)
+
+If you're on an older copy of this repo without this fix, `git pull`. If
+you still hit this crash even with the scoped fix: **once "illegal memory
+access" occurs, the CUDA context for the rest of that kernel process should
+be considered corrupted** — `Runtime -> Restart session` (not just
 re-running the cell) before retrying anything, since the error is
 asynchronously reported and the actual fault may have occurred earlier
-(e.g. during Section 9's training loop, only surfacing here). If it
-recurs after a genuine restart, this is an active upstream Unsloth
-correctness issue for this specific model, not something to chase further
-in this project's code — check
+(e.g. during Section 9's training loop, only surfacing here). If it recurs
+after a genuine restart, this is an active upstream Unsloth correctness
+issue for this specific model, not something to chase further in this
+project's code — check
 [unslothai/unsloth discussions on Gemma 4](https://github.com/unslothai/unsloth/discussions/4800)
 for the current state, and consider setting `evaluation.run_eval: false`
 temporarily to let training/saving complete while waiting for an upstream
