@@ -4,11 +4,27 @@ Maps ExperimentConfig onto SFTConfig field-for-field as the reference
 notebook uses them (section 10), substituting the notebook's manual
 steps_per_epoch/warmup_steps precomputation with SFTConfig's native
 warmup_ratio support — that estimate now lives in statistics.py instead, so
-it isn't duplicated. train_ds/eval_ds keep their native "messages" column
-(no reformatting) and are passed to SFTTrainer as-is — TRL auto-detects the
-conversational format and applies the chat template itself, which is what
-lets assistant_only_loss=True (masking the loss to just the assistant's own
-response tokens) work at all.
+it isn't duplicated. Formats the dataset via tokenizer.apply_chat_template on
+the raw "messages" column (no reformatting of the messages themselves) into
+a flat "text" field, matching the project's original resolved
+dataset-handling decision.
+
+NOTE on assistant_only_loss: an earlier version of this module passed
+train_ds/eval_ds to SFTTrainer with their native "messages" column intact
+and set SFTConfig(assistant_only_loss=True), so loss was computed only on
+the assistant's own response tokens instead of the whole conversation. That
+was reverted — not because the idea was wrong (tokenizer.
+patch_chat_template_for_assistant_masking() and the underlying chat-template
+generation-marker fix are still in place and still correct), but because
+combining it with packing=True hit a confirmed, reproduced crash inside
+Unsloth's own compiled SFTTrainer cache (ValueError: When padding_free=True
+without packing, max_length is not enforced...) that persisted across
+multiple independent fix attempts (packing_strategy="wrapped" included) and
+couldn't be further debugged without GPU access. Given packing matters more
+for training cost/speed than assistant-only-loss matters for training
+quality, packing won. Revisit assistant_only_loss=True (with train_ds/eval_ds
+passed unflattened again) once Unsloth's compiled trainer is confirmed to
+handle it correctly alongside packing.
 """
 
 from __future__ import annotations
@@ -67,11 +83,11 @@ def build_sft_config(config: ExperimentConfig, run_dir: Path, eval_available: bo
         # padding_free requires FlashAttention 2/3 to actually work — but
         # this project runs on Unsloth's own xformers-based attention
         # kernels (confirmed via the Section 7 load banner: "FA2 = False"),
-        # not FA2. That mismatch surfaced as `ValueError: When
-        # padding_free=True without packing, max_length is not enforced...`
-        # once assistant_only_loss's conversational dataset path was wired
-        # in. "wrapped" packing doesn't have this auto-enable behavior — the
-        # tradeoff is that it can occasionally cut an example across a
+        # not FA2. Kept as a defensive default even after reverting
+        # assistant_only_loss (see module docstring) since the padding_free
+        # auto-enable is triggered by packing+bfd alone, independent of
+        # that. "wrapped" packing doesn't have this auto-enable behavior —
+        # the tradeoff is that it can occasionally cut an example across a
         # pack boundary (vs. bfd's more careful bin-packing), a minor
         # quality cost given most conversations here are well under
         # max_seq_length, versus a hard crash.
@@ -79,16 +95,7 @@ def build_sft_config(config: ExperimentConfig, run_dir: Path, eval_available: bo
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs=None,
         seed=config.identity.seed,
-        # train_ds/eval_ds keep their native "messages" column (see train()
-        # below — no more pre-flattening to a "text" field), so SFTTrainer
-        # auto-detects the conversational format and applies the chat
-        # template itself. That's required for assistant_only_loss=True:
-        # it masks the loss to only the assistant's own response tokens,
-        # instead of the entire conversation (which is mostly repeated
-        # system-prompt/deployment-context boilerplate — see
-        # tokenizer.patch_chat_template_for_assistant_masking, applied to
-        # the tokenizer in model.load_base_model()).
-        assistant_only_loss=True,
+        dataset_text_field="text",
     )
 
     if eval_available:
@@ -163,12 +170,37 @@ def train(
 
     sft_config = build_sft_config(config, run_dir, eval_available)
 
-    # train_ds/eval_ds keep their native "messages" column — passed straight
-    # to SFTTrainer rather than pre-flattened to a "text" field, so TRL's own
-    # conversational-format auto-detection (is_conversational) applies the
-    # chat template itself and can build the assistant_masks that
-    # assistant_only_loss=True (set in build_sft_config above) needs.
-    eval_dataset = eval_ds if eval_available else None
+    # `tokenizer` here is actually Unsloth's returned Gemma4UnifiedProcessor
+    # (Gemma 4 is nominally multimodal — see inference.py's docstring for the
+    # same fact biting a different bug). Passing a `ProcessorMixin` as
+    # `processing_class` makes TRL's SFTTrainer set `self._is_vlm = True`
+    # (isinstance-based, unconditional — see trl/trainer/sft_trainer.py),
+    # which hard-blocks `packing` with a `ValueError` regardless of whether
+    # the dataset is actually multimodal — confirmed by reading TRL's source
+    # directly. This project never trains on images/audio/video, so passing
+    # the *inner* plain tokenizer instead (TRL's own code does
+    # `processing_class.tokenizer` internally for exactly this reason —
+    # every ProcessorMixin has one) avoids VLM mode entirely. Applying the
+    # chat template ourselves below uses this same object, so there's no
+    # ambiguity about which tokenizer's template is in effect.
+    processing_class = getattr(tokenizer, "tokenizer", tokenizer)
+
+    # Flatten each conversation's "messages" into a single "text" field via
+    # the chat template — SFTConfig.dataset_text_field="text" (set in
+    # build_sft_config) then trains on that flat string per example, the
+    # same way as the reference notebook. See this module's docstring for
+    # why this isn't the conversational messages-passthrough approach
+    # (assistant_only_loss) that was tried and reverted.
+    def _format(example: dict) -> dict:
+        return {
+            "text": processing_class.apply_chat_template(
+                example["messages"], tokenize=False, add_generation_prompt=False
+            )
+        }
+
+    formatted_train = train_ds.map(_format, remove_columns=train_ds.column_names)
+    formatted_eval = eval_ds.map(_format, remove_columns=eval_ds.column_names) if eval_available else None
+    eval_dataset = formatted_eval if eval_available else None
 
     def _sample_fn() -> list[dict]:
         n = min(8, len(train_ds))
@@ -179,27 +211,10 @@ def train(
         sample_fn=_sample_fn, decode_fn=inference.generate, eval_available=eval_available,
     )
 
-    # `tokenizer` here is actually Unsloth's returned Gemma4UnifiedProcessor
-    # (Gemma 4 is nominally multimodal — see inference.py's docstring for the
-    # same fact biting a different bug). Passing a `ProcessorMixin` as
-    # `processing_class` makes TRL's SFTTrainer set `self._is_vlm = True`
-    # (isinstance-based, unconditional — see trl/trainer/sft_trainer.py),
-    # which hard-blocks BOTH `packing` and `assistant_only_loss` with a
-    # `ValueError` regardless of whether the dataset is actually
-    # multimodal — confirmed by reading TRL's source directly. This project
-    # never trains on images/audio/video, so passing the *inner* plain
-    # tokenizer instead (TRL's own code does `processing_class.tokenizer`
-    # internally for exactly this reason — every ProcessorMixin has one)
-    # avoids VLM mode entirely, letting both packing and assistant_only_loss
-    # work as intended. tokenizer.patch_chat_template_for_assistant_masking()
-    # already patches this inner tokenizer's chat_template too (see its
-    # docstring), so the chat template stays consistent either way.
-    processing_class = getattr(tokenizer, "tokenizer", tokenizer)
-
     sft_trainer = SFTTrainer(
         model=peft_model,
         args=sft_config,
-        train_dataset=train_ds,
+        train_dataset=formatted_train,
         eval_dataset=eval_dataset,
         processing_class=processing_class,
         callbacks=callbacks,

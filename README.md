@@ -77,24 +77,28 @@ query:
 | PASS_4 | TIR envelope JSON (`status`, `operation`, `subject`, `qualifiers`, ...) |
 
 **There is no literal Cypher text anywhere in this dataset.** `DatasetLoader`
-keeps only the raw `messages` column — conversations are never flattened or
-split, and `trainer.train()` passes that column straight to `SFTTrainer`,
-which applies the chat template itself (see "Model backend" below for why
-that matters for loss masking). `evaluator.cypher_exact_match()` keeps its
-name for spec consistency, but in practice it compares the generated vs.
-gold assistant text (preferring a structural comparison of the parsed
-PASS_4 envelope when both sides parse).
+keeps only the raw `messages` column, and `trainer.train()` flattens each
+conversation into a single `text` field via `tokenizer.apply_chat_template()`
+(no reformatting of the messages themselves) before handing it to
+`SFTTrainer` — see "Model backend" below for why it's flattened rather than
+passed through natively. `evaluator.cypher_exact_match()` keeps its name
+for spec consistency, but in practice it compares the generated vs. gold
+assistant text (preferring a structural comparison of the parsed PASS_4
+envelope when both sides parse).
 
 **Each conversation row batches multiple query→response turns** (5 in the
 real `train_sft_batched.jsonl`/`val_sft_batched.jsonl`, confirmed by
 counting assistant turns directly against the file) — so a
 `data.max_train_samples` cap of, say, 10,000 rows is really ~50,000
-distinct supervised exchanges, not 10,000. Training only computes loss on
-the assistant turns' own tokens (`assistant_only_loss=True`, see "Model
-backend"), not the repeated system-prompt/deployment-context boilerplate
-that precedes every turn — so most of each row's *token count* is still
-that shared context, even though the *loss signal* is concentrated on the
-5 responses.
+distinct supervised exchanges, not 10,000. Training currently computes loss
+over the *entire* flattened conversation (system prompt + repeated
+deployment-context boilerplate + all turns), not just the assistant
+responses — an assistant-only-loss masking mode was built and verified to
+work correctly in isolation, but reverted before use because combining it
+with `packing=True` hit a confirmed, reproduced crash in Unsloth's compiled
+`SFTTrainer` that couldn't be resolved without GPU access; see "Model
+backend" below for the full story and what's kept in place for a future
+retry.
 
 `data.golden_path` in `configs/experiment.yaml` is optional and unset by
 default — `DatasetLoader.load_golden()` returns `None` and logs an info
@@ -180,24 +184,33 @@ Implementation notes, if you're reading the code:
   (and why an earlier version of this project instead disabled compilation
   globally via `UNSLOTH_COMPILE_DISABLE`, unnecessarily costing training
   speed too).
-- `model.load_base_model()` calls
-  `tokenizer.patch_chat_template_for_assistant_masking()` on the returned
-  tokenizer, and `trainer.build_sft_config()` sets `assistant_only_loss=True`
-  — together these make training compute loss only on the assistant's own
-  PASS_0-4 response tokens, not the entire conversation (system prompt +
-  deployment-context blob + all prior turns), which is what the plain
-  `dataset_text_field="text"` approach this project used before did.
-  `google/gemma-4-12B-it`'s own chat template has no `{% generation %}`
-  marker (confirmed by downloading and testing it directly), which is what
-  TRL's `assistant_only_loss` needs to build its per-token mask — the patch
-  inserts that marker around exactly the assistant-content span, verified
-  locally (byte-identical rendered text, correct per-turn token spans)
-  before being wired in. `trainer.train()` correspondingly passes
+- `trainer.train()` flattens each conversation's `messages` into a single
+  `text` field via `tokenizer.apply_chat_template()` before handing the
+  dataset to `SFTTrainer` (`SFTConfig(dataset_text_field="text")`) — loss is
+  computed over the entire flattened conversation (system prompt +
+  deployment-context blob + all turns), not just the assistant responses.
+  **This project tried and reverted a stricter alternative**: passing
   `train_ds`/`eval_ds` to `SFTTrainer` with their native `messages` column
-  intact (no more pre-flattening to a `text` field) — required for TRL's
-  conversational-format auto-detection to kick in at all. See
-  Troubleshooting if the patch ever raises (e.g. Google revises the
-  template upstream).
+  intact (letting TRL's conversational-format auto-detection apply the
+  chat template itself) plus `SFTConfig(assistant_only_loss=True)`, so loss
+  would count only the assistant's own PASS_0-4 response tokens. That part
+  worked and was verified correct in isolation — `google/gemma-4-12B-it`'s
+  chat template has no `{% generation %}` marker that
+  `assistant_only_loss` needs (confirmed by downloading and testing the
+  real template), so `tokenizer.patch_chat_template_for_assistant_masking()`
+  inserts one around exactly the assistant-content span (byte-identical
+  rendered text, correct per-turn token spans, verified locally against the
+  real tokenizer both before and after switching which object gets passed
+  to `SFTTrainer`). But combining it with `packing=True` hit a confirmed,
+  reproduced crash inside Unsloth's *compiled* `SFTTrainer` cache
+  (`ValueError: When padding_free=True without packing, max_length is not
+  enforced...`) that persisted across multiple independent fix attempts and
+  couldn't be resolved without GPU access to test against. Packing matters
+  more for training cost/speed than assistant-only-loss matters for
+  training quality, so packing won — `patch_chat_template_for_assistant_masking()`
+  is left in place, tested, and ready to re-enable once this is resolved
+  upstream; see Troubleshooting for the full incident and
+  `trainer.py`'s module docstring for where to pick it back up.
 - `trainer.train()` passes `getattr(tokenizer, "tokenizer", tokenizer)` —
   Unsloth's returned `tokenizer` is actually a `Gemma4UnifiedProcessor`
   (Gemma 4 is nominally multimodal — see `inference.py`'s docstring for a
@@ -205,26 +218,23 @@ Implementation notes, if you're reading the code:
   `SFTTrainer`, not the full processor. Confirmed directly by reading TRL's
   source: it sets `self._is_vlm = True` whenever `isinstance(processing_class,
   ProcessorMixin)`, *unconditionally* (regardless of whether the dataset
-  actually contains any images/audio/video), and hard-blocks `packing`,
-  `padding_free`, **and** `assistant_only_loss` for VLM mode with a
-  `ValueError`. This project never trains on anything but text, so passing
-  the processor's own inner tokenizer (confirmed via `AutoProcessor`
-  locally: `processor.tokenizer` exists, is a plain `PreTrainedTokenizerBase`
-  subclass, not a `ProcessorMixin`) avoids VLM mode entirely — verified
-  locally end-to-end (real downloaded `Gemma4UnifiedProcessor`, correct
-  `_is_vlm`-relevant `isinstance` result, non-zero `assistant_masks` from
-  the inner tokenizer's own `apply_chat_template`). Also confirmed the
-  outer processor and its inner tokenizer carry **separate** `chat_template`
-  strings (`proc.chat_template is not proc.tokenizer.chat_template`), which
-  is why `patch_chat_template_for_assistant_masking()` patches both
-  independently rather than assuming one covers the other.
+  actually contains any images/audio/video), and hard-blocks `packing`
+  (and, separately, `assistant_only_loss`) for VLM mode with a `ValueError`.
+  This project never trains on anything but text, so passing the
+  processor's own inner tokenizer (confirmed via `AutoProcessor` locally:
+  `processor.tokenizer` exists, is a plain `PreTrainedTokenizerBase`
+  subclass, not a `ProcessorMixin`) avoids VLM mode entirely — kept even
+  after reverting `assistant_only_loss`, since it's independently correct
+  and harmless either way.
 - `trainer.build_sft_config()` sets `packing_strategy="wrapped"` (not
   `SFTConfig`'s default `"bfd"`) — `"bfd"` unconditionally forces
   `padding_free=True` whenever `packing=True` (confirmed in TRL's source),
   and `padding_free` requires FlashAttention 2/3, which this project
   doesn't use (Unsloth's xformers-based kernels instead — confirmed via
-  Section 7's load banner). See Troubleshooting for the exact crash this
-  avoids.
+  Section 7's load banner). Kept as a defensive default even after
+  reverting `assistant_only_loss`, since this specific auto-enable is
+  triggered by `packing`+`"bfd"` alone. See Troubleshooting for the exact
+  crash this avoids.
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -790,52 +800,65 @@ check, either `git pull`, or just rewrite the offending YAML value with an
 explicit decimal point (`1.0e-4`) or plain decimal (`0.0001`) instead of
 bare scientific notation.
 
-**`RuntimeError: Could not find the expected assistant-content anchor...`**
-from `tokenizer.patch_chat_template_for_assistant_masking()`, during
-Section 7 (Load Model).
-This means `google/gemma-4-12B-it`'s `chat_template.jinja` has been revised
-upstream since this patch was written (its docstring/comment cites the
-template's own `Published: 2026-07-09` header — Google does update it,
-per that same header's changelog). The patch intentionally raises loudly
-here rather than silently leaving `assistant_only_loss=True` broken (which
-would otherwise surface later as a much more confusing TRL
-`RuntimeError: ...at least one example has no assistant tokens...` from
-deep inside `SFTTrainer`'s dataset preparation). Fix: fetch the current
-template (`https://huggingface.co/google/gemma-4-12B-it/raw/main/chat_template.jinja`),
-find wherever it now renders an assistant/model turn's actual text content,
-and update `_GENERATION_MARKER_ANCHOR`/`_GENERATION_MARKER_REPLACEMENT` in
-`tokenizer.py` to match the new structure — then re-verify the same way
-this was originally verified: load the tokenizer locally, patch it,
-confirm `apply_chat_template(..., tokenize=False)` renders byte-identical
-text before and after the patch, and confirm
-`apply_chat_template(..., return_assistant_tokens_mask=True)` produces
-non-zero, correctly-positioned spans. As a temporary unblock, remove
-`assistant_only_loss=True` from `trainer.build_sft_config()` and the
-`patch_chat_template_for_assistant_masking()` call in
-`model.load_base_model()` to fall back to loss-over-the-whole-conversation
-(the previous behavior) until the patch is updated.
-
-**`ValueError: Assistant-only loss is not yet supported for
-vision-language models. Please set 'assistant_only_loss=False' in the
-'SFTConfig'.`** during Section 9 (Train), inside `SFTTrainer.__init__`.
-Confirmed by reading TRL's source directly: `SFTTrainer` sets
-`self._is_vlm = True` whenever `isinstance(processing_class, ProcessorMixin)`
-— unconditionally, regardless of whether the dataset actually has any
-images/audio/video — and hard-blocks `assistant_only_loss` (and separately,
-`packing` and `padding_free`) in that mode. Unsloth's returned `tokenizer`
-for Gemma 4 is a genuine `Gemma4UnifiedProcessor` (`ProcessorMixin`
-subclass), since the model is nominally multimodal, which is exactly what
-trips this. Fixed in `trainer.train()`: it now passes
-`getattr(tokenizer, "tokenizer", tokenizer)` — the processor's own inner,
-plain-text tokenizer — as `processing_class` instead of the full processor,
-which this project's data (always text-only) never actually needs. If
-you're on an older clone still passing the full `tokenizer` directly to
-`SFTTrainer`, `git pull`. Note `patch_chat_template_for_assistant_masking()`
-patches *both* the outer processor and its inner tokenizer independently
-(confirmed locally: they carry separate `chat_template` strings, not a
-shared reference) specifically so this fix doesn't silently lose the
-generation-marker patch by switching which object gets passed to
-`SFTTrainer`.
+**Re-enabling `assistant_only_loss=True` (not the current default —
+see "Model backend"): three errors/warnings to expect, in the order
+you'll likely hit them.** This project tried
+`SFTConfig(assistant_only_loss=True)` together with `packing=True` and
+reverted it after a confirmed, unresolved crash — the entries below are
+kept for whoever picks this back up, not because they occur with the
+current default config.
+1. **`RuntimeError: Could not find the expected assistant-content
+   anchor...`** from `tokenizer.patch_chat_template_for_assistant_masking()`,
+   during Section 7 (Load Model). Means `google/gemma-4-12B-it`'s
+   `chat_template.jinja` has been revised upstream since this patch was
+   written (its docstring/comment cites the template's own
+   `Published: 2026-07-09` header — Google does update it). Fix: fetch the
+   current template
+   (`https://huggingface.co/google/gemma-4-12B-it/raw/main/chat_template.jinja`),
+   find wherever it now renders an assistant/model turn's actual text
+   content, and update `_GENERATION_MARKER_ANCHOR`/
+   `_GENERATION_MARKER_REPLACEMENT` in `tokenizer.py` to match — then
+   re-verify the same way this was originally verified: load the tokenizer
+   locally, patch it, confirm `apply_chat_template(..., tokenize=False)`
+   renders byte-identical text before/after, and confirm
+   `apply_chat_template(..., return_assistant_tokens_mask=True)` produces
+   non-zero, correctly-positioned spans.
+2. **`ValueError: Assistant-only loss is not yet supported for
+   vision-language models...`** during Section 9 (Train), inside
+   `SFTTrainer.__init__`. Confirmed by reading TRL's source directly:
+   `SFTTrainer` sets `self._is_vlm = True` whenever
+   `isinstance(processing_class, ProcessorMixin)` — unconditionally,
+   regardless of whether the dataset actually has any images/audio/video —
+   and hard-blocks `assistant_only_loss` (and separately, `packing`) in
+   that mode. Unsloth's returned `tokenizer` for Gemma 4 is a genuine
+   `Gemma4UnifiedProcessor` (`ProcessorMixin` subclass), since the model is
+   nominally multimodal, which trips this. Already handled regardless of
+   whether `assistant_only_loss` is on: `trainer.train()` passes
+   `getattr(tokenizer, "tokenizer", tokenizer)` — the processor's own
+   inner, plain-text tokenizer — as `processing_class`, which avoids VLM
+   mode. `patch_chat_template_for_assistant_masking()` patches *both* the
+   outer processor and its inner tokenizer independently (confirmed
+   locally: they carry separate `chat_template` strings, not a shared
+   reference), so re-enabling `assistant_only_loss` won't silently lose the
+   generation-marker patch.
+3. **`ValueError: When padding_free=True without packing, max_length is
+   not enforced...`** during Section 9 (Train), inside
+   `SFTTrainer.__init__` (surfaces through Unsloth's compiled
+   `UnslothSFTTrainer.__init__`) — **this is the one that was never
+   resolved.** It persisted even after fixes #1 and #2 above, and even
+   after setting `packing_strategy="wrapped"` (which reliably avoids the
+   *documented* TRL mechanism for this exact error — see the next entry —
+   but did not avoid it here). Something inside Unsloth's own *compiled*
+   `UnslothSFTTrainer.__init__` — not the plain `trl` package installed
+   locally, which was used to verify every other fix in this section —
+   ends up with `self.padding_free=True` and `args.packing=False`
+   simultaneously when `assistant_only_loss=True` and `packing=True` are
+   combined with a conversational (`messages`-column) dataset, and that
+   compiled file is regenerated per-run/per-model, not fetchable from
+   GitHub for offline inspection. This is where debugging stopped — it
+   needs either a live GPU session to trace further, or an upstream
+   Unsloth fix. Until then, `packing` and `assistant_only_loss` are
+   mutually exclusive in this project: pick one (see "Model backend").
 
 **`ValueError: When padding_free=True without packing, max_length is not
 enforced. Either enable packing..., provide already truncated inputs, or
@@ -859,20 +882,18 @@ packing can occasionally cut an example across a pack boundary (vs.
 conversations here are well under `max_seq_length`, versus a hard crash.
 If you're on an older clone still hitting this, `git pull`.
 
-**`WARNING:trl.trainer.sft_trainer:[RANK 0] The chat template does not
-include the assistant turn's end-of-turn token in the loss mask; the model
-may not learn to stop.`** during Section 9 (Train) — not an error, just a
-warning, and an already-documented, deliberate tradeoff: see "Known
-unverified risk areas" below.
-`patch_chat_template_for_assistant_masking()`'s generation-marker span
-covers exactly the assistant's response text but excludes the turn-closing
-`<turn|>` token (see its docstring/comment in `tokenizer.py`) — TRL is
-correctly flagging exactly this. If generation runs past a natural stopping
-point more than expected once training completes, extending the marker
-span to include `<turn|>` for `role == 'model'` is the fix to revisit (a
-larger change than the current one-line-anchor patch, since `<turn|>`'s
-rendering is shared across all roles in the template, not model-specific
-— see `chat_template.jinja`'s `continues_into_next`/closing-tag logic).
+(A fourth thing you'd see if `assistant_only_loss` gets past all three
+above: `WARNING:trl.trainer.sft_trainer:[RANK 0] The chat template does
+not include the assistant turn's end-of-turn token in the loss mask; the
+model may not learn to stop.` — not an error, and an already-known,
+deliberate tradeoff: `patch_chat_template_for_assistant_masking()`'s
+generation-marker span covers exactly the assistant's response text but
+excludes the turn-closing `<turn|>` token — see its docstring/comment in
+`tokenizer.py`. Extending the marker span to include `<turn|>` for
+`role == 'model'` would be a larger change than the current
+one-line-anchor patch, since `<turn|>`'s rendering is shared across all
+roles in the template, not model-specific — see `chat_template.jinja`'s
+`continues_into_next`/closing-tag logic.)
 
 **`continue_adapter` path not found.**
 `config.validate_config()` prints a warning at Configuration time (Section
@@ -932,16 +953,18 @@ defaults to `1e-4`, carried over from the reference notebook's
 `2e-4` is more conventional and worth trying if `1e-4` converges too slowly.
 `statistics.estimate_training_time()` is a rough heuristic (undocumented
 tokens/sec table), not a benchmark — treat it as a ballpark only.
+If `assistant_only_loss` ever gets re-enabled (not the current default —
+see "Model backend"):
 `patch_chat_template_for_assistant_masking()`'s generation-marker span
 covers exactly the assistant's response text (verified: decodes back to
 precisely the PASS_0-4 content), but deliberately *excludes* the turn's
-closing `<turn|>` token — meaning the model gets no direct gradient signal
-on learning when to stop each response via this mechanism specifically.
-This is a reasonable simplification (Gemma 4 already knows generic
-turn-closing conventions from pretraining; this LoRA only needs to relearn
-the PASS_0-4 content distribution) but is unverified end-to-end on real
-hardware — if generation runs past a natural stopping point more than
-before, this is the first place to look.
+closing `<turn|>` token — meaning the model would get no direct gradient
+signal on learning when to stop each response via this mechanism
+specifically. This is a reasonable simplification (Gemma 4 already knows
+generic turn-closing conventions from pretraining; this LoRA only needs to
+relearn the PASS_0-4 content distribution) but is unverified end-to-end on
+real hardware — if generation runs past a natural stopping point more than
+before, this would be the first place to look.
 
 ---
 
@@ -974,7 +997,10 @@ real Gemma 4 weights), and `utils.disable_unused_transformers_backends()`
 regardless of actual package presence, is idempotent, and tolerates the
 extra positional/keyword args `quantizer_torchao.py` actually calls it
 with — see "Model backend" above for why this patch exists), and
-`patch_chat_template_for_assistant_masking()` (asserts the `{% generation %}`
+`patch_chat_template_for_assistant_masking()` (currently unused by default
+— see "Model backend" for why `assistant_only_loss` was reverted — but
+kept and tested as ready-to-use infrastructure for whenever that gets
+revisited: asserts the `{% generation %}`
 marker gets correctly inserted around a fake template's assistant-content
 anchor, is a no-op when the marker is already present or no template is
 set, raises `RuntimeError` when the anchor is missing, and — mirroring the
