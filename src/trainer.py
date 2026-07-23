@@ -59,6 +59,23 @@ def build_sft_config(config: ExperimentConfig, run_dir: Path, eval_available: bo
         report_to="none",
         max_length=config.data.max_seq_length,
         packing=config.training.packing,
+        # "wrapped" instead of SFTConfig's default "bfd" packing strategy:
+        # TRL unconditionally forces padding_free=True whenever
+        # packing=True and packing_strategy=="bfd" (confirmed directly in
+        # trl/trainer/sft_trainer.py: `self.padding_free = args.padding_free
+        # or (args.packing and args.packing_strategy == "bfd")`), and
+        # padding_free requires FlashAttention 2/3 to actually work — but
+        # this project runs on Unsloth's own xformers-based attention
+        # kernels (confirmed via the Section 7 load banner: "FA2 = False"),
+        # not FA2. That mismatch surfaced as `ValueError: When
+        # padding_free=True without packing, max_length is not enforced...`
+        # once assistant_only_loss's conversational dataset path was wired
+        # in. "wrapped" packing doesn't have this auto-enable behavior — the
+        # tradeoff is that it can occasionally cut an example across a
+        # pack boundary (vs. bfd's more careful bin-packing), a minor
+        # quality cost given most conversations here are well under
+        # max_seq_length, versus a hard crash.
+        packing_strategy="wrapped",
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs=None,
         seed=config.identity.seed,

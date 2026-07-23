@@ -218,6 +218,13 @@ Implementation notes, if you're reading the code:
   strings (`proc.chat_template is not proc.tokenizer.chat_template`), which
   is why `patch_chat_template_for_assistant_masking()` patches both
   independently rather than assuming one covers the other.
+- `trainer.build_sft_config()` sets `packing_strategy="wrapped"` (not
+  `SFTConfig`'s default `"bfd"`) — `"bfd"` unconditionally forces
+  `padding_free=True` whenever `packing=True` (confirmed in TRL's source),
+  and `padding_free` requires FlashAttention 2/3, which this project
+  doesn't use (Unsloth's xformers-based kernels instead — confirmed via
+  Section 7's load banner). See Troubleshooting for the exact crash this
+  avoids.
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -829,6 +836,43 @@ patches *both* the outer processor and its inner tokenizer independently
 shared reference) specifically so this fix doesn't silently lose the
 generation-marker patch by switching which object gets passed to
 `SFTTrainer`.
+
+**`ValueError: When padding_free=True without packing, max_length is not
+enforced. Either enable packing..., provide already truncated inputs, or
+set max_length=None.`** during Section 9 (Train), inside
+`SFTTrainer.__init__` (surfaces through Unsloth's compiled
+`UnslothSFTTrainer.__init__`).
+Confirmed directly in `trl/trainer/sft_trainer.py`: TRL unconditionally
+computes `self.padding_free = args.padding_free or (args.packing and
+args.packing_strategy == "bfd")` — meaning `packing=True` with
+`SFTConfig`'s *default* `packing_strategy="bfd"` force-enables
+`padding_free` regardless of what this project sets for `padding_free`
+itself. `padding_free` only works with FlashAttention 2/3, per TRL's own
+docs — but this project runs on Unsloth's xformers-based attention
+kernels (confirmed via Section 7's load banner printing `FA2 = False`),
+not FA2. `trainer.build_sft_config()` now sets `packing_strategy="wrapped"`
+instead of the default `"bfd"` — reproduced locally: constructing a real
+`SFTConfig` with `packing_strategy="bfd"` computes `padding_free=True` via
+TRL's own formula above; `"wrapped"` computes `False`. Tradeoff: `"wrapped"`
+packing can occasionally cut an example across a pack boundary (vs.
+`"bfd"`'s more careful bin-packing) — a minor quality cost given most
+conversations here are well under `max_seq_length`, versus a hard crash.
+If you're on an older clone still hitting this, `git pull`.
+
+**`WARNING:trl.trainer.sft_trainer:[RANK 0] The chat template does not
+include the assistant turn's end-of-turn token in the loss mask; the model
+may not learn to stop.`** during Section 9 (Train) — not an error, just a
+warning, and an already-documented, deliberate tradeoff: see "Known
+unverified risk areas" below.
+`patch_chat_template_for_assistant_masking()`'s generation-marker span
+covers exactly the assistant's response text but excludes the turn-closing
+`<turn|>` token (see its docstring/comment in `tokenizer.py`) — TRL is
+correctly flagging exactly this. If generation runs past a natural stopping
+point more than expected once training completes, extending the marker
+span to include `<turn|>` for `role == 'model'` is the fix to revisit (a
+larger change than the current one-line-anchor patch, since `<turn|>`'s
+rendering is shared across all roles in the template, not model-specific
+— see `chat_template.jinja`'s `continues_into_next`/closing-tag logic).
 
 **`continue_adapter` path not found.**
 `config.validate_config()` prints a warning at Configuration time (Section

@@ -77,3 +77,24 @@ class TestBuildSftConfig:
         sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=True)
         assert sft_config.gradient_checkpointing is False
         assert sft_config.gradient_checkpointing_kwargs is None
+
+    def test_packing_strategy_is_wrapped_not_bfd(self, tmp_path):
+        # TRL unconditionally forces padding_free=True whenever packing=True
+        # and packing_strategy=="bfd" (confirmed directly in
+        # trl/trainer/sft_trainer.py), and padding_free requires
+        # FlashAttention 2/3 — this project runs on Unsloth's xformers-based
+        # attention kernels instead, which surfaced as
+        # `ValueError: When padding_free=True without packing, max_length is
+        # not enforced...` once assistant_only_loss's conversational dataset
+        # path was wired in. "wrapped" packing doesn't have this auto-enable
+        # behavior — reproduced locally: constructing a real SFTConfig with
+        # packing_strategy="bfd" computes padding_free=True via TRL's own
+        # `args.padding_free or (args.packing and args.packing_strategy ==
+        # "bfd")` formula; "wrapped" computes False.
+        config = _config()
+        sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=True)
+        assert sft_config.packing_strategy == "wrapped"
+        computed_padding_free = sft_config.padding_free or (
+            sft_config.packing and sft_config.packing_strategy == "bfd"
+        )
+        assert computed_padding_free is False
