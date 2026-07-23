@@ -13,7 +13,7 @@ import pytest
 
 transformers = pytest.importorskip("transformers", reason="transformers not installed in this environment")
 
-from src.tokenizer import patch_extra_special_tokens_list_format
+from src.tokenizer import patch_chat_template_for_assistant_masking, patch_extra_special_tokens_list_format
 
 
 def _get_base_class():
@@ -98,3 +98,43 @@ class TestPatchExtraSpecialTokensListFormat:
             assert base_cls._set_model_specific_special_tokens is once_patched
         finally:
             base_cls._set_model_specific_special_tokens = original
+
+
+class _FakeTokenizerWithTemplate:
+    def __init__(self, chat_template):
+        self.chat_template = chat_template
+
+
+class TestPatchChatTemplateForAssistantMasking:
+    def test_wraps_captured_content_for_model_role_only(self):
+        # Minimal stand-in for the real anchor line's surrounding structure —
+        # exercises only the string-replacement logic, not real Jinja
+        # rendering (that was verified separately against the real
+        # downloaded google/gemma-4-12B-it template before this was wired
+        # into training: byte-identical rendered text, correct per-turn
+        # assistant token spans).
+        original = "before {{- captured_content -}} after"
+        tok = _FakeTokenizerWithTemplate(original)
+        patch_chat_template_for_assistant_masking(tok)
+        assert "{% generation %}" in tok.chat_template
+        assert "{% endgeneration %}" in tok.chat_template
+        assert "role == 'model'" in tok.chat_template
+        # The anchor's original (unwrapped) form must still appear once, in
+        # the else-branch for non-model roles.
+        assert tok.chat_template.count("{{- captured_content -}}") == 2
+
+    def test_noop_when_template_already_has_generation_marker(self):
+        already_patched = "{% generation %}{{- captured_content -}}{% endgeneration %}"
+        tok = _FakeTokenizerWithTemplate(already_patched)
+        patch_chat_template_for_assistant_masking(tok)
+        assert tok.chat_template == already_patched
+
+    def test_noop_when_no_chat_template(self):
+        tok = _FakeTokenizerWithTemplate(None)
+        patch_chat_template_for_assistant_masking(tok)  # must not raise
+        assert tok.chat_template is None
+
+    def test_raises_when_anchor_not_found(self):
+        tok = _FakeTokenizerWithTemplate("some unrelated template with no matching anchor")
+        with pytest.raises(RuntimeError, match="chat_template.jinja structure may have changed"):
+            patch_chat_template_for_assistant_masking(tok)

@@ -77,11 +77,24 @@ query:
 | PASS_4 | TIR envelope JSON (`status`, `operation`, `subject`, `qualifiers`, ...) |
 
 **There is no literal Cypher text anywhere in this dataset.** `DatasetLoader`
-feeds the `messages` array straight into `tokenizer.apply_chat_template()`
-with no reformatting — conversations are never flattened or split.
-`evaluator.cypher_exact_match()` keeps its name for spec consistency, but in
-practice it compares the generated vs. gold assistant text (preferring a
-structural comparison of the parsed PASS_4 envelope when both sides parse).
+keeps only the raw `messages` column — conversations are never flattened or
+split, and `trainer.train()` passes that column straight to `SFTTrainer`,
+which applies the chat template itself (see "Model backend" below for why
+that matters for loss masking). `evaluator.cypher_exact_match()` keeps its
+name for spec consistency, but in practice it compares the generated vs.
+gold assistant text (preferring a structural comparison of the parsed
+PASS_4 envelope when both sides parse).
+
+**Each conversation row batches multiple query→response turns** (5 in the
+real `train_sft_batched.jsonl`/`val_sft_batched.jsonl`, confirmed by
+counting assistant turns directly against the file) — so a
+`data.max_train_samples` cap of, say, 10,000 rows is really ~50,000
+distinct supervised exchanges, not 10,000. Training only computes loss on
+the assistant turns' own tokens (`assistant_only_loss=True`, see "Model
+backend"), not the repeated system-prompt/deployment-context boilerplate
+that precedes every turn — so most of each row's *token count* is still
+that shared context, even though the *loss signal* is concentrated on the
+5 responses.
 
 `data.golden_path` in `configs/experiment.yaml` is optional and unset by
 default — `DatasetLoader.load_golden()` returns `None` and logs an info
@@ -167,6 +180,24 @@ Implementation notes, if you're reading the code:
   (and why an earlier version of this project instead disabled compilation
   globally via `UNSLOTH_COMPILE_DISABLE`, unnecessarily costing training
   speed too).
+- `model.load_base_model()` calls
+  `tokenizer.patch_chat_template_for_assistant_masking()` on the returned
+  tokenizer, and `trainer.build_sft_config()` sets `assistant_only_loss=True`
+  — together these make training compute loss only on the assistant's own
+  PASS_0-4 response tokens, not the entire conversation (system prompt +
+  deployment-context blob + all prior turns), which is what the plain
+  `dataset_text_field="text"` approach this project used before did.
+  `google/gemma-4-12B-it`'s own chat template has no `{% generation %}`
+  marker (confirmed by downloading and testing it directly), which is what
+  TRL's `assistant_only_loss` needs to build its per-token mask — the patch
+  inserts that marker around exactly the assistant-content span, verified
+  locally (byte-identical rendered text, correct per-turn token spans)
+  before being wired in. `trainer.train()` correspondingly passes
+  `train_ds`/`eval_ds` to `SFTTrainer` with their native `messages` column
+  intact (no more pre-flattening to a `text` field) — required for TRL's
+  conversational-format auto-detection to kick in at all. See
+  Troubleshooting if the patch ever raises (e.g. Google revises the
+  template upstream).
 - Never calls `merge_and_unload()` on either the fresh-init or
   continue-adapter path — the adapter always stays separate from the base
   model.
@@ -732,6 +763,31 @@ check, either `git pull`, or just rewrite the offending YAML value with an
 explicit decimal point (`1.0e-4`) or plain decimal (`0.0001`) instead of
 bare scientific notation.
 
+**`RuntimeError: Could not find the expected assistant-content anchor...`**
+from `tokenizer.patch_chat_template_for_assistant_masking()`, during
+Section 7 (Load Model).
+This means `google/gemma-4-12B-it`'s `chat_template.jinja` has been revised
+upstream since this patch was written (its docstring/comment cites the
+template's own `Published: 2026-07-09` header — Google does update it,
+per that same header's changelog). The patch intentionally raises loudly
+here rather than silently leaving `assistant_only_loss=True` broken (which
+would otherwise surface later as a much more confusing TRL
+`RuntimeError: ...at least one example has no assistant tokens...` from
+deep inside `SFTTrainer`'s dataset preparation). Fix: fetch the current
+template (`https://huggingface.co/google/gemma-4-12B-it/raw/main/chat_template.jinja`),
+find wherever it now renders an assistant/model turn's actual text content,
+and update `_GENERATION_MARKER_ANCHOR`/`_GENERATION_MARKER_REPLACEMENT` in
+`tokenizer.py` to match the new structure — then re-verify the same way
+this was originally verified: load the tokenizer locally, patch it,
+confirm `apply_chat_template(..., tokenize=False)` renders byte-identical
+text before and after the patch, and confirm
+`apply_chat_template(..., return_assistant_tokens_mask=True)` produces
+non-zero, correctly-positioned spans. As a temporary unblock, remove
+`assistant_only_loss=True` from `trainer.build_sft_config()` and the
+`patch_chat_template_for_assistant_masking()` call in
+`model.load_base_model()` to fall back to loss-over-the-whole-conversation
+(the previous behavior) until the patch is updated.
+
 **`continue_adapter` path not found.**
 `config.validate_config()` prints a warning at Configuration time (Section
 3) if the path doesn't exist yet — this is expected if you haven't uploaded
@@ -790,6 +846,16 @@ defaults to `1e-4`, carried over from the reference notebook's
 `2e-4` is more conventional and worth trying if `1e-4` converges too slowly.
 `statistics.estimate_training_time()` is a rough heuristic (undocumented
 tokens/sec table), not a benchmark — treat it as a ballpark only.
+`patch_chat_template_for_assistant_masking()`'s generation-marker span
+covers exactly the assistant's response text (verified: decodes back to
+precisely the PASS_0-4 content), but deliberately *excludes* the turn's
+closing `<turn|>` token — meaning the model gets no direct gradient signal
+on learning when to stop each response via this mechanism specifically.
+This is a reasonable simplification (Gemma 4 already knows generic
+turn-closing conventions from pretraining; this LoRA only needs to relearn
+the PASS_0-4 content distribution) but is unverified end-to-end on real
+hardware — if generation runs past a natural stopping point more than
+before, this is the first place to look.
 
 ---
 
@@ -821,9 +887,19 @@ real Gemma 4 weights), and `utils.disable_unused_transformers_backends()`
 `is_torchaudio_available`/`is_torchao_available` to return `False`
 regardless of actual package presence, is idempotent, and tolerates the
 extra positional/keyword args `quantizer_torchao.py` actually calls it
-with — see "Model backend" above for why this patch exists). Tests requiring an unavailable
-package (e.g. `trl`/`torch` if not installed locally) skip cleanly rather
-than failing. Unsloth's actual model loading (`model.load_base_model`,
-`model.attach_lora`) is not covered by these tests — it needs a GPU and is
-unverified by this project (see "Model backend" above); the recommended
-validation is a small `data.max_train_samples` smoke test on Colab.
+with — see "Model backend" above for why this patch exists), and
+`patch_chat_template_for_assistant_masking()` (asserts the `{% generation %}`
+marker gets correctly inserted around a fake template's assistant-content
+anchor, is a no-op when the marker is already present or no template is
+set, and raises `RuntimeError` when the anchor is missing — these test the
+string-replacement logic in isolation; the actual Jinja rendering
+correctness against the real `google/gemma-4-12B-it` template was verified
+separately, offline, before this was wired into training: byte-identical
+rendered text before/after patching, and `return_assistant_tokens_mask=True`
+producing per-turn spans that decode back to exactly the PASS_0-4 assistant
+content). Tests requiring an unavailable package (e.g. `trl`/`torch` if not
+installed locally) skip cleanly rather than failing. Unsloth's actual model
+loading (`model.load_base_model`, `model.attach_lora`) is not covered by
+these tests — it needs a GPU and is unverified by this project (see "Model
+backend" above); the recommended validation is a small
+`data.max_train_samples` smoke test on Colab.

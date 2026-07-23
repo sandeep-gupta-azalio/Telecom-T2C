@@ -4,9 +4,11 @@ Maps ExperimentConfig onto SFTConfig field-for-field as the reference
 notebook uses them (section 10), substituting the notebook's manual
 steps_per_epoch/warmup_steps precomputation with SFTConfig's native
 warmup_ratio support — that estimate now lives in statistics.py instead, so
-it isn't duplicated. Formats the dataset via tokenizer.apply_chat_template on
-the raw "messages" column (no reformatting), matching the project's
-resolved dataset-handling decision.
+it isn't duplicated. train_ds/eval_ds keep their native "messages" column
+(no reformatting) and are passed to SFTTrainer as-is — TRL auto-detects the
+conversational format and applies the chat template itself, which is what
+lets assistant_only_loss=True (masking the loss to just the assistant's own
+response tokens) work at all.
 """
 
 from __future__ import annotations
@@ -56,11 +58,20 @@ def build_sft_config(config: ExperimentConfig, run_dir: Path, eval_available: bo
         # integration, so it stays no-op-safe even when wandb is unavailable.
         report_to="none",
         max_length=config.data.max_seq_length,
-        dataset_text_field="text",
         packing=config.training.packing,
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs=None,
         seed=config.identity.seed,
+        # train_ds/eval_ds keep their native "messages" column (see train()
+        # below — no more pre-flattening to a "text" field), so SFTTrainer
+        # auto-detects the conversational format and applies the chat
+        # template itself. That's required for assistant_only_loss=True:
+        # it masks the loss to only the assistant's own response tokens,
+        # instead of the entire conversation (which is mostly repeated
+        # system-prompt/deployment-context boilerplate — see
+        # tokenizer.patch_chat_template_for_assistant_masking, applied to
+        # the tokenizer in model.load_base_model()).
+        assistant_only_loss=True,
     )
 
     if eval_available:
@@ -113,17 +124,6 @@ def build_callbacks(
     return callbacks
 
 
-def _make_formatting_fn(tokenizer: Any):
-    def _format(example: dict) -> dict:
-        return {
-            "text": tokenizer.apply_chat_template(
-                example["messages"], tokenize=False, add_generation_prompt=False
-            )
-        }
-
-    return _format
-
-
 def train(
     config: ExperimentConfig,
     peft_model: Any,
@@ -146,9 +146,12 @@ def train(
 
     sft_config = build_sft_config(config, run_dir, eval_available)
 
-    format_fn = _make_formatting_fn(tokenizer)
-    formatted_train = train_ds.map(format_fn, remove_columns=train_ds.column_names)
-    formatted_eval = eval_ds.map(format_fn, remove_columns=eval_ds.column_names) if eval_available else None
+    # train_ds/eval_ds keep their native "messages" column — passed straight
+    # to SFTTrainer rather than pre-flattened to a "text" field, so TRL's own
+    # conversational-format auto-detection (is_conversational) applies the
+    # chat template itself and can build the assistant_masks that
+    # assistant_only_loss=True (set in build_sft_config above) needs.
+    eval_dataset = eval_ds if eval_available else None
 
     def _sample_fn() -> list[dict]:
         n = min(8, len(train_ds))
@@ -162,8 +165,8 @@ def train(
     sft_trainer = SFTTrainer(
         model=peft_model,
         args=sft_config,
-        train_dataset=formatted_train,
-        eval_dataset=formatted_eval,
+        train_dataset=train_ds,
+        eval_dataset=eval_dataset,
         processing_class=tokenizer,
         callbacks=callbacks,
     )

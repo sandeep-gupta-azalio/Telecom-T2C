@@ -167,6 +167,14 @@ def load_base_model(
             f"Unsloth FastModel.from_pretrained({model_config.base_model!r}) failed: {exc}."
         ) from exc
 
+    # Enables trainer.build_sft_config()'s assistant_only_loss=True: without
+    # this, the loss is computed over the entire conversation (including the
+    # repeated system-prompt/deployment-context boilerplate that precedes
+    # every turn), not just the assistant's actual PASS_0-4 responses. See
+    # patch_chat_template_for_assistant_masking's docstring for the full
+    # confirmed root cause (this template has no {% generation %} marker).
+    tokenizer_mod.patch_chat_template_for_assistant_masking(tokenizer)
+
     logger.info("Model + tokenizer loaded via Unsloth.")
     return model, tokenizer
 

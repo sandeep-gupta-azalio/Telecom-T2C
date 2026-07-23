@@ -69,6 +69,72 @@ def patch_extra_special_tokens_list_format() -> None:
     PreTrainedTokenizerBase._set_model_specific_special_tokens = _patched
 
 
+_GENERATION_MARKER_ANCHOR = "{{- captured_content -}}"
+_GENERATION_MARKER_REPLACEMENT = (
+    "{%- if role == 'model' -%}"
+    "{% generation %}{{- captured_content -}}{% endgeneration %}"
+    "{%- else -%}"
+    "{{- captured_content -}}"
+    "{%- endif -%}"
+)
+
+
+def patch_chat_template_for_assistant_masking(tokenizer: Any) -> None:
+    """Insert `{% generation %}`/`{% endgeneration %}` markers around the
+    assistant-content span in google/gemma-4-12B-it's chat template.
+
+    Why this is needed: TRL's `SFTConfig.assistant_only_loss=True` (masking
+    the training loss to only the assistant's own response tokens, instead
+    of the entire conversation including the repeated system-prompt/
+    deployment-context boilerplate that precedes every turn) depends on
+    `tokenizer.apply_chat_template(..., return_assistant_tokens_mask=True)`,
+    which itself depends on the chat template containing a `{% generation %}`
+    block around assistant content. Confirmed directly (downloaded the real
+    tokenizer/template and tested locally): google/gemma-4-12B-it's own
+    `chat_template.jinja` does not have this marker at all — transformers
+    logs `return_assistant_tokens_mask==True but chat template does not
+    contain '{% generation %}' keyword` and silently returns an all-zero
+    mask, which TRL then turns into a hard `RuntimeError` the moment
+    `assistant_only_loss=True` is set ("at least one example has no
+    assistant tokens... missing the `{% generation %}` keyword").
+
+    This patches the template's `{{- captured_content -}}` line (the exact
+    span that renders an assistant/model turn's actual text, excluding the
+    surrounding `<|turn>model` header and `<turn|>` closing token) to wrap
+    it in the marker only when `role == 'model'`, leaving every other role
+    (`system`/`user`) and the overall rendered *text* output completely
+    unchanged — verified locally (byte-identical rendering, correct
+    per-turn assistant token spans decoding back to exactly the PASS_0-4
+    content) before this was wired into training.
+
+    Raises RuntimeError if the exact anchor text isn't found — e.g. if
+    Google revises the template's structure upstream — rather than silently
+    no-op'ing and leaving assistant_only_loss broken without any signal.
+    Idempotent: no-ops if the template already has `{% generation %}`
+    (covers a future template that ships this natively).
+    """
+    template = getattr(tokenizer, "chat_template", None)
+    if not template:
+        return
+    if "{% generation %}" in template:
+        return
+
+    if _GENERATION_MARKER_ANCHOR not in template:
+        raise RuntimeError(
+            "Could not find the expected assistant-content anchor "
+            f"({_GENERATION_MARKER_ANCHOR!r}) in the tokenizer's chat_template — "
+            "google/gemma-4-12B-it's chat_template.jinja structure may have "
+            "changed upstream. patch_chat_template_for_assistant_masking() needs "
+            "updating to match the new template before assistant_only_loss=True "
+            "can work; until then, either fix this patch or set "
+            "training.assistant_only_loss: false (if exposed) / remove "
+            "assistant_only_loss=True from trainer.build_sft_config()."
+        )
+
+    tokenizer.chat_template = template.replace(_GENERATION_MARKER_ANCHOR, _GENERATION_MARKER_REPLACEMENT, 1)
+    logger.info("Patched chat template with generation markers for assistant-only-loss masking.")
+
+
 def resolve_hf_token(env_var_name: str = "HF_TOKEN") -> Optional[str]:
     """Resolve a Hugging Face token from the environment, then Colab secrets.
 
