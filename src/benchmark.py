@@ -33,7 +33,8 @@ class BenchmarkReport:
     golden_metrics: Optional[dict[str, Any]]
     num_golden_examples: int
     predictions_path: Optional[str]
-    pass_metric_status: dict[str, str]
+    pass_metrics: dict[str, dict[str, Any]]
+    eval_dataset_source: Optional[str]
     notes: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,27 +48,41 @@ def run_benchmark(
     golden_dataset: Optional[Any],
     hf_token: Optional[str] = None,
     val_metrics: Optional[dict[str, float]] = None,
+    fallback_dataset: Optional[Any] = None,
+    fallback_dataset_name: str = "val",
 ) -> BenchmarkReport:
-    """Reload the trained adapter, run golden generation-eval if available, and write a report.
+    """Reload the trained adapter, run generation-based eval, and write a report.
 
     val_metrics, if provided, is the loss-based metrics dict already computed
     by trainer.evaluate() during training — passed through here rather than
     recomputed, since recomputing it would require the live SFTTrainer
     instance, which a standalone benchmark run doesn't have.
+
+    fallback_dataset (typically val_ds) is used for the generation-based
+    metrics (exact-match + per-PASS accuracy) ONLY when golden_dataset is
+    None — this project's default config has data.golden_path unset, so
+    without this fallback the benchmark would never actually produce
+    generation metrics for a typical run. eval_dataset_source in the
+    returned report records which one was actually used ("golden",
+    fallback_dataset_name, or None if neither was available).
     """
     inference_model, tokenizer = inference.load_model_for_inference(
         config.model, config.data.max_seq_length, str(adapter_dir), hf_token
     )
 
+    eval_dataset = golden_dataset if golden_dataset is not None else fallback_dataset
+    eval_dataset_source = "golden" if golden_dataset is not None else (fallback_dataset_name if fallback_dataset is not None else None)
+
     golden_metrics: Optional[dict[str, Any]] = None
-    num_golden = 0
+    pass_metrics: dict[str, dict[str, Any]] = {}
+    num_examples = 0
     predictions_path: Optional[Path] = None
 
-    if golden_dataset is not None:
+    if eval_dataset is not None:
         predictions = evaluator.generate_predictions(
             inference_model,
             tokenizer,
-            golden_dataset,
+            eval_dataset,
             max_new_tokens=config.evaluation.max_new_tokens_eval,
             decode_fn=inference.generate,
         )
@@ -76,13 +91,14 @@ def run_benchmark(
             "exact_match_rate": (sum(scores) / len(scores)) if scores else 0.0,
             "num_examples": len(predictions),
         }
-        num_golden = len(predictions)
+        pass_metrics = {name: acc.to_dict() for name, acc in evaluator.evaluate_passes(predictions).items()}
+        num_examples = len(predictions)
         predictions_dir = utils.ensure_dir(run_dir / "predictions")
-        predictions_path = evaluator.export_predictions(predictions, predictions_dir / "golden_predictions.jsonl")
+        predictions_path = evaluator.export_predictions(
+            predictions, predictions_dir / f"{eval_dataset_source}_predictions.jsonl"
+        )
     else:
-        logger.info("No golden dataset provided — golden benchmark metrics will be omitted.")
-
-    pass_metric_status = {name: "not_implemented" for name in evaluator.PASS_METRIC_STUBS}
+        logger.info("No golden or fallback dataset provided — generation-based benchmark metrics will be omitted.")
 
     return BenchmarkReport(
         run_id=run_dir.name,
@@ -91,13 +107,15 @@ def run_benchmark(
         adapter_dir=str(adapter_dir),
         val_metrics=val_metrics,
         golden_metrics=golden_metrics,
-        num_golden_examples=num_golden,
+        num_golden_examples=num_examples,
         predictions_path=str(predictions_path) if predictions_path else None,
-        pass_metric_status=pass_metric_status,
+        pass_metrics=pass_metrics,
+        eval_dataset_source=eval_dataset_source,
         notes=(
-            "cypher_exact_match compares parsed PASS_4 TIR envelopes (or raw text as a fallback) — "
-            "there is no literal Cypher in this dataset. PASS_0-PASS_3 metrics are interfaces only "
-            "(pass_metric_status), not yet implemented."
+            "golden_metrics.exact_match_rate compares parsed PASS_4 TIR envelopes (or raw text as a "
+            "fallback) — there is no literal Cypher in this dataset. pass_metrics gives per-PASS_0-4 "
+            "accuracy plus parse-failure counts (see evaluator.evaluate_passes); eval_dataset_source "
+            "records whether golden or the val-set fallback was used."
         ),
     )
 

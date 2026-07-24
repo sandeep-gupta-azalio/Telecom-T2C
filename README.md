@@ -26,7 +26,7 @@ Telecom-T2C/
     model.py           # 4-bit QLoRA base model + LoRA adapter via Unsloth (fresh or continue)
     trainer.py           # TRL SFTTrainer orchestration
     callbacks.py           # TrainerCallback subclasses (wandb wiring)
-    evaluator.py             # validation/golden eval, PASS_0-4 metric interfaces
+    evaluator.py             # validation/golden eval, PASS_0-4 parsing + accuracy scoring
     benchmark.py               # post-training benchmark report
     inference.py                 # reload + generate (with a decode-bug workaround)
     server.py                      # FastAPI /generate endpoint for the inference-server notebook
@@ -407,19 +407,31 @@ directory regardless of what's already there.
   `evaluation.run_eval: true` and a validation/golden split is available
   (`data.eval_source` selects which). Section 10 of the notebook also calls
   `evaluator.evaluate_validation()` explicitly after training finishes.
-- **Golden generation-eval**: only runs if `data.golden_path` is set and the
-  file exists — otherwise skipped gracefully. Produces
-  `outputs/runs/<run>/predictions/golden_predictions.jsonl` and an
-  `exact_match_rate` in the benchmark report.
-- **PASS_0 - PASS_4 metrics**: `evaluator.PASS_METRIC_STUBS` are
-  **interfaces only** — each raises `NotImplementedError` with a docstring
-  naming the dataset block it corresponds to. `benchmark.py`'s report
-  records their status as `"not_implemented"` for transparency. Implement
-  real comparators here when ready; nothing else in the pipeline depends on
-  them being implemented yet.
+- **Generation-eval dataset**: uses `data.golden_path` if set and the file
+  exists; otherwise **falls back to the validation set** (`val_ds`) so this
+  actually produces results with the default config (`golden_path: null`).
+  `report.eval_dataset_source` records which one was used (`"golden"` or
+  `"val"`). Produces `outputs/runs/<run>/predictions/<source>_predictions.jsonl`
+  and an `exact_match_rate` in the benchmark report.
+- **PASS_0 - PASS_4 accuracy** (`evaluator.evaluate_passes()`): each pass is
+  parsed out of the assistant turn independently —
+  `parse_pass0_normalizations` (src/dst pairs, or `[]` for `"(none)"`),
+  `parse_pass1_lexemes` (ordered quoted-lexeme list), `parse_pass2_intent`
+  (the single canonical operation string), `parse_pass3_semantic` (YAML ->
+  dict), `parse_pass4_envelope` (brace-matched JSON, reused from
+  `cypher_exact_match`) — then compared for exact equality against the same
+  parse of the gold reply. `benchmark_report.json`'s `pass_metrics` gives,
+  per pass: `accuracy`, `num_scored`, `num_gold_unparseable` (gold itself
+  didn't parse — excluded from the denominator; should be ~0 on real data),
+  and `num_prediction_unparseable` (the model produced no parseable section
+  for that pass at all, as opposed to a parseable-but-wrong value) — the
+  last two distinguish "model output is garbled" from "model output is
+  well-formed but incorrect," which a single blended score can't tell apart.
+  `evaluator.PASS_METRICS` also exposes each pass as a single
+  `(prediction, gold) -> Optional[float]` comparator, for ad-hoc scoring.
 - Standalone re-benchmark of a saved adapter: call `benchmark.run_benchmark()`
-  directly with a config, an adapter directory, and (optionally) a
-  pre-loaded golden dataset.
+  directly with a config, an adapter directory, and a golden and/or
+  fallback (val) dataset.
 
 ---
 

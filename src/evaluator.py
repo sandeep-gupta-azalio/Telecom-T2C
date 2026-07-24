@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+import yaml
 
 from src import utils
 
@@ -116,27 +119,187 @@ def cypher_exact_match(prediction: str, gold: str) -> float:
     return 1.0 if prediction.strip() == gold.strip() else 0.0
 
 
-def _pass_stub(pass_name: str, description: str) -> PassMetric:
-    def _metric(prediction: str, gold: str) -> Optional[float]:
-        raise NotImplementedError(
-            f"{pass_name} metric ({description}) is not implemented yet — interface only, "
-            "per project spec. Wire in a real comparator here when ready."
-        )
+_PASS_NAMES: tuple[str, ...] = ("PASS_0", "PASS_1", "PASS_2", "PASS_3", "PASS_4")
 
-    _metric.__name__ = f"{pass_name.lower()}_metric"
-    _metric.__doc__ = f"{pass_name}: {description}. Not yet implemented — placeholder interface only."
+
+def _extract_pass_section(text: str, pass_name: str) -> Optional[str]:
+    """Return the raw text between `pass_name`'s marker and the next PASS_N marker (or end of text).
+
+    Locates the EARLIEST occurrence of any other PASS_N marker after
+    pass_name's position, rather than assuming PASS_0..PASS_4 always appear
+    in order immediately after one another — robust to a malformed
+    generation that garbles ordering or omits a section. Returns None if
+    pass_name itself isn't found at all.
+    """
+    start = text.find(pass_name)
+    if start == -1:
+        return None
+    start += len(pass_name)
+    end = len(text)
+    for other in _PASS_NAMES:
+        if other == pass_name:
+            continue
+        idx = text.find(other, start)
+        if idx != -1 and idx < end:
+            end = idx
+    return text[start:end].strip("\n")
+
+
+def _section_lines(section: str, header: str) -> list[str]:
+    """Split a pass section into non-blank lines, dropping its literal header line if present."""
+    lines = [ln for ln in section.splitlines() if ln.strip()]
+    if lines and lines[0].strip() == header:
+        lines = lines[1:]
+    return lines
+
+
+def parse_pass0_normalizations(text: str) -> Optional[list[tuple[str, str]]]:
+    """Parse PASS_0's Normalization block into (surface, normalized) pairs.
+
+    Matches pass_builder.PassLabels.render_assistant's rendering: "(none)"
+    on its own for zero normalizations, else src/"↓"/dst line triples.
+    Returns None if the PASS_0 marker is missing or the section doesn't fit
+    either shape (malformed generation).
+    """
+    section = _extract_pass_section(text, "PASS_0")
+    if section is None:
+        return None
+    lines = _section_lines(section, "Normalization")
+    if not lines or lines[0].strip() == "(none)":
+        return []
+    if len(lines) % 3 != 0:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for i in range(0, len(lines), 3):
+        src, arrow, dst = lines[i].strip(), lines[i + 1].strip(), lines[i + 2].strip()
+        if arrow != "↓":
+            return None
+        pairs.append((src, dst))
+    return pairs
+
+
+def parse_pass1_lexemes(text: str) -> Optional[list[str]]:
+    """Parse PASS_1's Lexical Detection block into an ordered list of quoted lexemes.
+
+    Each real line is `- "lexeme"`; returns None if the PASS_1 marker is
+    missing or any non-blank line doesn't match that shape.
+    """
+    section = _extract_pass_section(text, "PASS_1")
+    if section is None:
+        return None
+    lexemes: list[str] = []
+    for line in _section_lines(section, "Lexical Detection"):
+        match = re.match(r'^-\s*"(.*)"\s*$', line.strip())
+        if match is None:
+            return None
+        lexemes.append(match.group(1))
+    return lexemes
+
+
+def parse_pass2_intent(text: str) -> Optional[str]:
+    """Parse PASS_2's Intent block into its single canonical operation string."""
+    section = _extract_pass_section(text, "PASS_2")
+    if section is None:
+        return None
+    lines = _section_lines(section, "Intent")
+    if len(lines) != 1:
+        return None
+    return lines[0].strip()
+
+
+def parse_pass3_semantic(text: str) -> Optional[dict[str, Any]]:
+    """Parse PASS_3's Semantic Resolution block (plain YAML, no literal header line) into a dict."""
+    section = _extract_pass_section(text, "PASS_3")
+    if not section:
+        return None
+    try:
+        data = yaml.safe_load(section)
+    except yaml.YAMLError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# Parser registry: one entry per block in the dataset's assistant-turn
+# structure (PassLabels.render_assistant in the sibling t2c project). Each
+# parser takes a full assistant-turn string and returns a structured,
+# equality-comparable value, or None if that pass's marker is missing or its
+# content doesn't fit the expected shape — used by evaluate_passes() below
+# to score prediction vs. gold per pass, and to distinguish "wrong value"
+# from "failed to produce a parseable section at all".
+PASS_PARSERS: dict[str, Callable[[str], Any]] = {
+    "PASS_0": parse_pass0_normalizations,
+    "PASS_1": parse_pass1_lexemes,
+    "PASS_2": parse_pass2_intent,
+    "PASS_3": parse_pass3_semantic,
+    "PASS_4": parse_pass4_envelope,
+}
+
+
+def _make_pass_metric(parser: Callable[[str], Any]) -> PassMetric:
+    def _metric(prediction: str, gold: str) -> Optional[float]:
+        gold_value = parser(gold)
+        if gold_value is None:
+            return None
+        return 1.0 if parser(prediction) == gold_value else 0.0
+
     return _metric
 
 
-# Placeholder interfaces only (explicitly requested — do not implement yet).
-# Each corresponds 1:1 to a block in the dataset's assistant-turn structure.
-PASS_METRIC_STUBS: dict[str, PassMetric] = {
-    "PASS_0": _pass_stub("PASS_0", "Normalization — spelling/token fixes only"),
-    "PASS_1": _pass_stub("PASS_1", "Lexical Detection — quoted verbatim phrases from normalized text"),
-    "PASS_2": _pass_stub("PASS_2", "Intent — exactly one canonical operation"),
-    "PASS_3": _pass_stub("PASS_3", "Semantic Resolution — YAML semantic record"),
-    "PASS_4": _pass_stub("PASS_4", "TIR envelope JSON — status and diagnostics"),
+# One (prediction, gold) -> Optional[float] comparator per pass, for callers
+# that just want a single score rather than evaluate_passes' full breakdown.
+PASS_METRICS: dict[str, PassMetric] = {
+    name: _make_pass_metric(parser) for name, parser in PASS_PARSERS.items()
 }
+
+
+@dataclass
+class PassAccuracy:
+    accuracy: float
+    num_scored: int
+    num_gold_unparseable: int
+    num_prediction_unparseable: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+def evaluate_passes(predictions: list["PredictionRecord"]) -> dict[str, PassAccuracy]:
+    """Score every prediction against its gold reply, per PASS_0..PASS_4.
+
+    For each pass: examples whose GOLD reply doesn't parse for that pass are
+    excluded from the denominator entirely (num_gold_unparseable tracks how
+    many — this should be ~0 on real data; a nonzero count usually means a
+    parser bug here, not a bad dataset row). Among the rest, a prediction
+    that doesn't parse counts as wrong (num_prediction_unparseable tracks
+    how many of those wrong answers were specifically "produced no
+    parseable section" rather than "parsed but had the wrong value") —
+    distinguishing malformed-output failures from wrong-value failures is
+    the main diagnostic value of this function over a single blended score.
+    """
+    report: dict[str, PassAccuracy] = {}
+    for pass_name, parser in PASS_PARSERS.items():
+        scored = 0
+        correct = 0
+        gold_unparseable = 0
+        prediction_unparseable = 0
+        for record in predictions:
+            gold_value = parser(record.gold)
+            if gold_value is None:
+                gold_unparseable += 1
+                continue
+            scored += 1
+            prediction_value = parser(record.generated)
+            if prediction_value is None:
+                prediction_unparseable += 1
+            elif prediction_value == gold_value:
+                correct += 1
+        report[pass_name] = PassAccuracy(
+            accuracy=(correct / scored) if scored else 0.0,
+            num_scored=scored,
+            num_gold_unparseable=gold_unparseable,
+            num_prediction_unparseable=prediction_unparseable,
+        )
+    return report
 
 
 def _prepare_prompt_and_gold(messages: list[dict]) -> Optional[tuple[list[dict], str]]:
