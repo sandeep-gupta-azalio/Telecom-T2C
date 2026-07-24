@@ -54,8 +54,8 @@ checkpoint, wandb_logger, evaluator -> callbacks -> inference -> trainer -> benc
 **Read this before you run anything — it differs from what "Text-to-Cypher"
 might suggest.**
 
-Each line of `dataset/phase1/train_sft_batched.jsonl` /
-`val_sft_batched.jsonl` is one complete multi-turn conversation:
+Each line of `dataset/phase1/train_sft.jsonl` / `val_sft.jsonl` is one
+complete conversation (potentially multi-turn):
 
 ```json
 {"messages": [
@@ -89,11 +89,16 @@ for spec consistency, but in practice it compares the generated vs. gold
 assistant text (preferring a structural comparison of the parsed PASS_4
 envelope when both sides parse).
 
-**Each conversation row batches multiple query→response turns** (5 in the
-real `train_sft_batched.jsonl`/`val_sft_batched.jsonl`, confirmed by
-counting assistant turns directly against the file) — so a
-`data.max_train_samples` cap of, say, 10,000 rows is really ~50,000
-distinct supervised exchanges, not 10,000. Training currently computes loss
+**A conversation row may batch multiple query→response turns** — an earlier
+version of this dataset (`train_sft_batched.jsonl`/`val_sft_batched.jsonl`)
+packed 5 query/assistant exchanges per row (confirmed by counting assistant
+turns directly against that file), so a `data.max_train_samples` cap of,
+say, 10,000 rows was really ~50,000 distinct supervised exchanges, not
+10,000. The current dataset files (`train_sft.jsonl`/`val_sft.jsonl`, built
+unbatched, with far fewer total rows) may have a different rows-to-turns
+ratio — re-confirm by counting assistant turns if this matters for your
+`max_train_samples` planning; `max_train_samples: null` (this project's
+current default) trains on every row regardless. Training currently computes loss
 over the *entire* flattened conversation (system prompt + repeated
 deployment-context boilerplate + all turns), not just the assistant
 responses — an assistant-only-loss masking mode was built and verified to
@@ -272,15 +277,16 @@ when a GPU or the relevant package (`trl`, etc.) isn't present.
 
 ### Colab (for actually training)
 
-1. Upload or `git clone` this repository into your Colab environment, e.g.:
-   ```
-   !git clone <your-repo-url> /content/Telecom-T2C
-   %cd /content/Telecom-T2C
-   ```
-2. Open `notebooks/Telecom_T2C_Trainer_v2.ipynb` in Colab.
-3. **Runtime -> Change runtime type -> A100 GPU** (Colab Pro/Pro+).
-4. Edit `configs/experiment.yaml` for your data/adapter paths (see below).
-5. Run all cells top to bottom.
+1. Open `notebooks/Telecom_T2C_Trainer_v2.ipynb` in Colab — no manual
+   `git clone` needed. **Runtime -> Change runtime type -> A100 GPU**
+   (Colab Pro/Pro+).
+2. Run Section 0 ("Sync Code + Mount Google Drive") first — it clones this
+   repo into `/content/Telecom-T2C` on a fresh runtime (or `git pull`s the
+   latest commit if the runtime already has it, stashing/restoring any
+   local edit to `configs/experiment.yaml` around the pull) and mounts
+   Google Drive at `/content/drive`.
+3. Edit `configs/experiment.yaml` for your data/adapter paths (see below).
+4. Run the rest of the cells top to bottom.
 
 ---
 
@@ -300,9 +306,12 @@ when a GPU or the relevant package (`trl`, etc.) isn't present.
 ## Google Drive setup
 
 Set `drive.google_drive_directory` in `configs/experiment.yaml` (defaults to
-`/content/drive/MyDrive/telecom_t2c`). The notebook's Configuration section
-(3) auto-mounts Drive via `utils.mount_google_drive()` if this is set; the
-Save section (11) auto-creates `<google_drive_directory>/<run_name>/` and
+`/content/drive/MyDrive/telecom_t2c`). Section 0 mounts Drive at
+`/content/drive` up front (before `data.train_path`/`val_path`, which point
+under there, are ever read); the Configuration section (3) mounts it again
+defensively via `utils.mount_google_drive()` for anyone who skips Section
+0 — a no-op if already mounted. The Save section (11) auto-creates
+`<google_drive_directory>/<run_name>/` and
 copies `adapter/`, `manifest.json`, `config.yaml`, `metrics/`, and
 `predictions/` into it. Set `drive.google_drive_directory: null` to disable
 Drive entirely — training will still work, you'll just need to download the

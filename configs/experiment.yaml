@@ -23,11 +23,12 @@ identity:
 # Dataset is multi-turn chat JSONL: {"messages": [...]}. See README "Dataset format".
 # -----------------------------------------------------------------------------
 data:
-  train_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/train_sft_batched.jsonl
-  val_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/val_sft_batched.jsonl
+  train_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/train_sft.jsonl
+  val_path: /content/drive/MyDrive/telecom_t2c/dataset/phase1/val_sft.jsonl
   golden_path: null                          # optional golden eval JSONL; skipped gracefully if unset/missing
   eval_source: val                           # "val" | "golden" — which split feeds loss-based eval during training
   max_train_samples: null                    # cap on training rows (seeded random sample); null = full dataset
+                                              # (unbatched dataset has far fewer rows than before — train on all of it)
   max_eval_samples: 256                      # cap on eval rows
   max_seq_length: 1536                       # token cap; feeds SFTConfig.max_length and packing
 
