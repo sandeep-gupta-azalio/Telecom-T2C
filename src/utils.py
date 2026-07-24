@@ -272,6 +272,30 @@ def mount_google_drive(mount_point: str = "/content/drive") -> Optional[Path]:
         return None
 
 
+def resolve_secret(env_var_name: str) -> Optional[str]:
+    """Resolve an arbitrary secret from the environment, then Colab secrets.
+
+    Same env-var-then-Colab-secret lookup tokenizer.resolve_hf_token uses,
+    generalized for secrets that aren't an HF token (e.g. an ngrok
+    authtoken) — kept here rather than in tokenizer.py since it has nothing
+    to do with tokenization. Returns None (not an error) if not found.
+    """
+    import os
+
+    value = os.environ.get(env_var_name)
+    if value:
+        return value
+    try:
+        from google.colab import userdata  # type: ignore[import-not-found]
+
+        value = userdata.get(env_var_name)
+        if value:
+            return value
+    except Exception:
+        pass
+    return None
+
+
 def human_bytes(n: int) -> str:
     """Format a byte count as a human-readable string (e.g. '543.2 MB')."""
     size = float(n)

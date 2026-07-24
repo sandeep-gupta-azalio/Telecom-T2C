@@ -15,7 +15,9 @@ continuation). LoRA weights are always kept as a separate adapter.
 
 ```
 Telecom-T2C/
-  notebooks/Telecom_T2C_Trainer_v2.ipynb   # orchestration only, no business logic
+  notebooks/
+    Telecom_T2C_Trainer_v2.ipynb           # training orchestration only, no business logic
+    Telecom_T2C_Inference_Server.ipynb     # Drive adapter -> ngrok tunnel, for local testing
   src/                                     # all real logic lives here
     config.py       # the only place YAML is parsed
     dataset.py       # DatasetLoader: load/validate train/val/golden splits
@@ -27,6 +29,7 @@ Telecom-T2C/
     evaluator.py             # validation/golden eval, PASS_0-4 metric interfaces
     benchmark.py               # post-training benchmark report
     inference.py                 # reload + generate (with a decode-bug workaround)
+    server.py                      # FastAPI /generate endpoint for the inference-server notebook
     wandb_logger.py                # no-op-safe Weights & Biases gateway
     checkpoint.py                    # checkpoint discovery/cleanup, Drive sync
     manifest.py                        # run/adapter provenance manifest.json
@@ -417,6 +420,34 @@ directory regardless of what's already there.
 - Standalone re-benchmark of a saved adapter: call `benchmark.run_benchmark()`
   directly with a config, an adapter directory, and (optionally) a
   pre-loaded golden dataset.
+
+---
+
+## Testing the fine-tuned adapter from your own PC
+
+A 12B model needs far more VRAM than most laptop/desktop GPUs have — even
+4-bit QLoRA weights alone are roughly 6GB+, before KV cache/activations.
+`notebooks/Telecom_T2C_Inference_Server.ipynb` works around this by keeping
+the GPU work on Colab: it mounts Google Drive, auto-detects the most
+recently synced `run_*/adapter/` (via
+`checkpoint.find_latest_synced_run()`), reloads it through
+`inference.load_model_for_inference()` (same code path as the trainer
+notebook's Section 12 Smoke Test), and serves a `POST /generate` endpoint
+(`src/server.py`, FastAPI) tunneled out through
+[ngrok](https://ngrok.com) so a plain `requests.post(...)` from your own
+machine reaches it.
+
+- Needs a free ngrok account + authtoken (Colab secret `NGROK_AUTHTOKEN`,
+  or pasted in when prompted).
+- `/generate` requires a bearer token that's generated fresh each run and
+  only ever printed in the notebook output — never written to disk. Anyone
+  with both the printed ngrok URL and this token can reach your model, so
+  treat both as sensitive for the lifetime of the tunnel.
+- `fastapi`, `uvicorn`, and `pyngrok` are installed directly in that
+  notebook's Install cell, not in `requirements.txt` — they're
+  serving-only, not needed for training.
+- The tunnel stays up only as long as the Colab runtime is connected;
+  closing the tab or letting Colab idle-disconnect kills it.
 
 ---
 

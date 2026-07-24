@@ -72,6 +72,26 @@ def prune_checkpoints(output_dir: Path, keep: set[Path]) -> None:
             shutil.rmtree(child, ignore_errors=True)
 
 
+def find_latest_synced_run(drive_base_dir: Path) -> Optional[Path]:
+    """Return the most recently Drive-synced run_* directory that has an adapter/ subdir.
+
+    Run directory names (run_YYYYMMDD_HHMMSS, via utils.timestamp_run_id) sort
+    correctly as plain strings, so — unlike find_latest_checkpoint's numeric
+    suffix parse — a lexicographic sort is sufficient here.
+    """
+    if not drive_base_dir.is_dir():
+        return None
+    candidates = [
+        child
+        for child in drive_base_dir.iterdir()
+        if child.is_dir() and child.name.startswith("run_") and (child / "adapter").is_dir()
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.name)
+    return candidates[-1]
+
+
 def zip_adapter(adapter_dir: Path, zip_path: Path) -> Path:
     """Zip adapter_dir to zip_path (notebook section 12's shutil.make_archive)."""
     if not adapter_dir.is_dir():
