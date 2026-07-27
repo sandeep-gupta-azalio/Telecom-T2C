@@ -17,6 +17,7 @@ continuation). LoRA weights are always kept as a separate adapter.
 Telecom-T2C/
   notebooks/
     Telecom_T2C_Trainer_v2.ipynb           # training orchestration only, no business logic
+    Telecom_T2C_Benchmark.ipynb            # re-run PASS_0-4/exact-match eval against an existing adapter
     Telecom_T2C_Inference_Server.ipynb     # Drive adapter -> ngrok tunnel, for local testing
   src/                                     # all real logic lives here
     config.py       # the only place YAML is parsed
@@ -440,7 +441,24 @@ directory regardless of what's already there.
   `(prediction, gold) -> Optional[float]` comparator, for ad-hoc scoring.
 - Standalone re-benchmark of a saved adapter: call `benchmark.run_benchmark()`
   directly with a config, an adapter directory, and a golden and/or
-  fallback (val) dataset.
+  fallback (val) dataset — or use `notebooks/Telecom_T2C_Benchmark.ipynb`
+  (below), which does exactly this without re-running training.
+
+## Re-benchmarking without retraining
+
+`notebooks/Telecom_T2C_Benchmark.ipynb` is a minimal-steps notebook for
+re-running generation-based eval (`exact_match_rate` + `pass_metrics`)
+against an **already-trained** adapter on Google Drive — no dataset
+statistics, no fresh model/adapter load beyond what `run_benchmark()` needs
+internally, no training. Useful for checking whether a code fix (e.g. an
+`inference.py`/prompt-construction change) actually improved generation
+quality, without a multi-hour re-run of the full trainer notebook. Sections:
+Sync Code + Mount Drive, Runtime Check, Install, Configuration, Locate
+Adapter (auto-detects the latest Drive-synced `run_*/adapter/`, or set
+`ADAPTER_RUN_OVERRIDE` to a specific run name), Load Validation/Golden
+Dataset, Run Benchmark. Writes `benchmark_report.json` and
+`<source>_predictions.jsonl` back into the *same* Drive run directory the
+adapter came from, alongside `adapter/`.
 
 ---
 
