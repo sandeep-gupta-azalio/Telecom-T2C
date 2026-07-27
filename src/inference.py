@@ -140,6 +140,16 @@ def _resolve_stop_token_ids(tokenizer: Any) -> set[int]:
     closing sequence isn't safe to stop on after a single argmax step, so
     that case logs a warning and falls back to eos_token_id alone rather
     than silently doing something wrong.
+
+    `tokenizer` here is often actually Unsloth's Gemma4UnifiedProcessor
+    (Gemma 4 is nominally multimodal — see load_model_for_inference's
+    docstring for the same fact biting other bugs). apply_chat_template is
+    exposed on the processor directly, but `.encode()` is not — only its
+    *inner* `.tokenizer` has it (confirmed: a real run raised
+    `'Gemma4UnifiedProcessor' object has no attribute 'encode'`, silently
+    degrading discovery to eos_token_id-only every time) — so encode() is
+    called on getattr(tokenizer, "tokenizer", tokenizer), matching the same
+    processor/tokenizer duality trainer.py already handles.
     """
     stop_ids: set[int] = set()
     if getattr(tokenizer, "eos_token_id", None) is not None:
@@ -156,7 +166,8 @@ def _resolve_stop_token_ids(tokenizer: Any) -> set[int]:
         )
         after_sentinel = rendered.split(_STOP_TOKEN_PROBE_SENTINEL, 1)[1].strip()
         if after_sentinel:
-            closing_ids = tokenizer.encode(after_sentinel, add_special_tokens=False)
+            encoder = getattr(tokenizer, "tokenizer", tokenizer)
+            closing_ids = encoder.encode(after_sentinel, add_special_tokens=False)
             if len(closing_ids) == 1:
                 stop_ids.add(int(closing_ids[0]))
             else:

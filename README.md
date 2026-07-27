@@ -1125,6 +1125,22 @@ plus `model.generate()`'s fallback path (`eos_token_id=` now accepts the
 full discovered set, not just the tokenizer's own single default).
 **Also requires no retraining** — purely a decode-loop fix.
 
+**`WARNING | ... | Could not discover an additional turn-closing stop
+token ('Gemma4UnifiedProcessor' object has no attribute 'encode') — using
+eos_token_id only, which may cause over-generation.`** — a real bug in
+the fix above's first version, not something to ignore: `tokenizer` here
+is often actually Unsloth's `Gemma4UnifiedProcessor` (Gemma 4 is nominally
+multimodal — the same fact behind several other bugs in this file).
+`apply_chat_template` is exposed on the processor directly, but
+`.encode()` is not — only its *inner* `.tokenizer` has it.
+`_resolve_stop_token_ids()` now calls `.encode()` on
+`getattr(tokenizer, "tokenizer", tokenizer)`, matching the same
+processor/tokenizer duality `trainer.py` already handles for exactly this
+reason. Before this fix, discovery silently degraded to `eos_token_id`
+alone on *every* call — harmless (no crash, no wrong output), but it
+meant the over-generation problem above wasn't actually fixed despite the
+warning being easy to miss in a long log.
+
 **`ValueError: Incorrect image source. Must be a valid URL starting with
 `http://` or `https://`, a valid path to an image file, or a base64
 encoded string. Got <bos><|turn>system...`** during Section 12 (Smoke

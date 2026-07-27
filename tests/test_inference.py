@@ -147,6 +147,29 @@ class TestResolveStopTokenIds:
 
         assert _resolve_stop_token_ids(NoEncodeTokenizer()) == {_EOS_ID}
 
+    def test_discovers_closing_token_through_inner_tokenizer_when_outer_lacks_encode(self):
+        # Regression test for a real Colab failure: Unsloth's
+        # Gemma4UnifiedProcessor (Gemma 4 is nominally multimodal) exposes
+        # apply_chat_template directly but has no .encode() of its own —
+        # only its inner .tokenizer does. Without the getattr(tokenizer,
+        # "tokenizer", tokenizer) unwrap, this raised
+        # "'Gemma4UnifiedProcessor' object has no attribute 'encode'" and
+        # silently degraded to eos_token_id-only on every single call.
+        class ProcessorWithoutEncode:
+            eos_token_id = _EOS_ID
+
+            def __init__(self, inner):
+                self.tokenizer = inner
+
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+                return self.tokenizer.apply_chat_template(
+                    messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt
+                )
+
+        processor = ProcessorWithoutEncode(FakeTokenizer())
+        assert not hasattr(processor, "encode")
+        assert _resolve_stop_token_ids(processor) == {_EOS_ID, 9}
+
     def test_no_eos_token_id_and_no_discoverable_closer_returns_empty_set(self):
         class NoStopTokenizer:
             eos_token_id = None
