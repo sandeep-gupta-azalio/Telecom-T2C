@@ -110,6 +110,71 @@ def _infer_device(model: Any) -> Any:
     return next(model.parameters()).device
 
 
+_STOP_TOKEN_PROBE_SENTINEL = "\x00__T2C_STOP_TOKEN_PROBE__\x00"
+
+
+def _resolve_stop_token_ids(tokenizer: Any) -> set[int]:
+    """Discover this tokenizer's real "turn complete" stop token(s), not just eos_token_id.
+
+    Confirmed directly against google/gemma-4-12B-it's tokenizer_config.json:
+    this template's actual turn-closing marker is a SEPARATE token from
+    eos_token ("eot_token": "<turn|>" vs "eos_token": "<eos>"). The model
+    correctly learns to predict the turn-closer (that's what training
+    targets — see build_prompt()'s docstring), but a decode loop that only
+    checks eos_token_id never recognizes it as a stop signal, so generation
+    ran to max_new_tokens on every single example even after producing a
+    fully correct PASS_0-4 answer — confirmed empirically (generated text
+    ~2x gold's length on median, 12% of a real 256-example eval run
+    degenerating into a repeated garbage tail after the correct answer).
+
+    Rather than hardcode the literal "<turn|>" (fragile if the template
+    changes upstream, and not necessarily correct for any other model this
+    project might target later), this discovers it the same way
+    build_prompt() discovers the prompt prefix: render a short conversation
+    ending in a real assistant turn with add_generation_prompt=False (the
+    exact call trainer.train() uses) via a unique sentinel, then look at
+    what immediately follows that sentinel in the rendered text — that
+    suffix is the template's own turn-closing sequence, tokenized to get
+    its real id directly from this tokenizer's own vocabulary. Only added
+    as a stop id when it resolves to exactly one token; a multi-token
+    closing sequence isn't safe to stop on after a single argmax step, so
+    that case logs a warning and falls back to eos_token_id alone rather
+    than silently doing something wrong.
+    """
+    stop_ids: set[int] = set()
+    if getattr(tokenizer, "eos_token_id", None) is not None:
+        stop_ids.add(int(tokenizer.eos_token_id))
+
+    try:
+        rendered = tokenizer.apply_chat_template(
+            [
+                {"role": "user", "content": "probe"},
+                {"role": "assistant", "content": _STOP_TOKEN_PROBE_SENTINEL},
+            ],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        after_sentinel = rendered.split(_STOP_TOKEN_PROBE_SENTINEL, 1)[1].strip()
+        if after_sentinel:
+            closing_ids = tokenizer.encode(after_sentinel, add_special_tokens=False)
+            if len(closing_ids) == 1:
+                stop_ids.add(int(closing_ids[0]))
+            else:
+                logger.warning(
+                    "Turn-closing sequence %r tokenizes to %d tokens %r, not 1 — not adding "
+                    "it as a stop token (falling back to eos_token_id only, which may "
+                    "cause over-generation).",
+                    after_sentinel, len(closing_ids), closing_ids,
+                )
+    except Exception as exc:
+        logger.warning(
+            "Could not discover an additional turn-closing stop token (%s) — using "
+            "eos_token_id only, which may cause over-generation.", exc,
+        )
+
+    return stop_ids
+
+
 def greedy_decode(
     model: Any,
     input_ids: Any,
@@ -117,6 +182,7 @@ def greedy_decode(
     tokenizer: Any,
     max_new_tokens: int = 512,
     fast: bool = False,
+    stop_token_ids: Optional[set] = None,
 ) -> Any:
     """Manual greedy per-token decode loop — verbatim port of notebook section 13.
 
@@ -133,6 +199,11 @@ def greedy_decode(
     each step. The emitted tokens are identical — it is the same argmax over
     the same logits — but it re-enables the cache the original workaround
     deliberately avoided, so it stays opt-in via evaluation.fast_decode.
+
+    ``stop_token_ids``, if given, is unioned with tokenizer.eos_token_id —
+    see _resolve_stop_token_ids' docstring for why eos_token_id alone isn't
+    enough for this project's chat template. Callers that don't pass it get
+    eos_token_id-only behavior (unchanged from before this was added).
     """
     import torch
 
@@ -142,7 +213,12 @@ def greedy_decode(
 
     generated = input_ids
     attn = attention_mask
-    eos_id = tokenizer.eos_token_id
+    stop_ids = set(stop_token_ids or ())
+    if tokenizer.eos_token_id is not None:
+        stop_ids.add(int(tokenizer.eos_token_id))
+
+    def _is_stop(token_id: int) -> bool:
+        return token_id in stop_ids
 
     with torch.inference_mode():
         if not fast:
@@ -152,7 +228,7 @@ def greedy_decode(
                 generated = torch.cat([generated, next_token], dim=-1)
                 if attn is not None:
                     attn = torch.cat([attn, torch.ones_like(next_token, dtype=attn.dtype)], dim=-1)
-                if eos_id is not None and int(next_token[0, 0]) == int(eos_id):
+                if _is_stop(int(next_token[0, 0])):
                     break
             return generated
 
@@ -167,7 +243,7 @@ def greedy_decode(
             generated = torch.cat([generated, next_token], dim=-1)
             if attn is not None:
                 attn = torch.cat([attn, torch.ones_like(next_token, dtype=attn.dtype)], dim=-1)
-            if eos_id is not None and int(next_token[0, 0]) == int(eos_id):
+            if _is_stop(int(next_token[0, 0])):
                 break
             # Only the new token goes in next round; the cache holds the rest.
             step_ids = next_token
@@ -190,6 +266,7 @@ def generate(
     """
     prompt = build_prompt(tokenizer, messages)
     device = _infer_device(model)
+    stop_token_ids = _resolve_stop_token_ids(tokenizer)
     # text= must be an explicit keyword, not positional: Gemma 4 is nominally
     # multimodal, so Unsloth/transformers loads `tokenizer` as a
     # Gemma4UnifiedProcessor whose __call__ signature is
@@ -210,6 +287,7 @@ def generate(
             tokenizer,
             max_new_tokens=max_new_tokens,
             fast=fast,
+            stop_token_ids=stop_token_ids,
         )
         return tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
     except Exception as exc:
@@ -225,6 +303,7 @@ def generate(
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=list(stop_token_ids) if stop_token_ids else tokenizer.eos_token_id,
             )
         return tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
 
@@ -276,19 +355,24 @@ def greedy_decode_batch(
     attention_mask: Any,
     tokenizer: Any,
     max_new_tokens: int = 512,
+    stop_token_ids: Optional[set] = None,
 ) -> Any:
     """Batched greedy decode with a KV cache — the batched counterpart to
     greedy_decode(fast=True) (always cached; batching an uncached O(n^2)
     loop isn't worth the added code path).
 
-    A sequence that reaches EOS is "frozen": its next token is forced to
-    pad_token_id for every remaining step rather than removing it from the
-    batch (removing a row mid-batch would mean re-slicing every tensor,
-    including past_key_values, which is more failure-prone than just
-    padding it out and truncating the result afterward in generate_batch()).
-    Its continued presence doesn't affect other rows — batched attention is
-    per-row/independent as long as attention_mask/position_ids are correct,
-    which they are.
+    stop_token_ids, if given, is unioned with tokenizer.eos_token_id — see
+    _resolve_stop_token_ids' docstring for why eos_token_id alone isn't
+    enough for this project's chat template.
+
+    A sequence that reaches a stop token is "frozen": its next token is
+    forced to pad_token_id for every remaining step rather than removing it
+    from the batch (removing a row mid-batch would mean re-slicing every
+    tensor, including past_key_values, which is more failure-prone than
+    just padding it out and truncating the result afterward in
+    generate_batch()). Its continued presence doesn't affect other rows —
+    batched attention is per-row/independent as long as
+    attention_mask/position_ids are correct, which they are.
     """
     import torch
 
@@ -296,8 +380,14 @@ def greedy_decode_batch(
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
 
-    eos_id = tokenizer.eos_token_id
     pad_id = tokenizer.pad_token_id
+    stop_ids = set(stop_token_ids or ())
+    if tokenizer.eos_token_id is not None:
+        stop_ids.add(int(tokenizer.eos_token_id))
+    stop_ids_tensor = (
+        torch.tensor(sorted(stop_ids), dtype=torch.long, device=input_ids.device) if stop_ids else None
+    )
+
     batch_size = input_ids.shape[0]
     finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
@@ -318,12 +408,12 @@ def greedy_decode_batch(
             )
             past = outputs.past_key_values
             next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            if eos_id is not None and pad_id is not None:
+            if pad_id is not None:
                 next_token = torch.where(finished.unsqueeze(1), torch.full_like(next_token, pad_id), next_token)
             generated = torch.cat([generated, next_token], dim=-1)
             attn = torch.cat([attn, torch.ones_like(next_token, dtype=attn.dtype)], dim=-1)
-            if eos_id is not None:
-                finished = finished | (next_token.squeeze(1) == eos_id)
+            if stop_ids_tensor is not None:
+                finished = finished | torch.isin(next_token.squeeze(1), stop_ids_tensor)
             if bool(finished.all()):
                 break
             step_ids = next_token
@@ -353,17 +443,21 @@ def generate_batch(
 
     device = _infer_device(model)
     prompts = [build_prompt(tokenizer, m) for m in messages_batch]
+    stop_token_ids = _resolve_stop_token_ids(tokenizer)
 
     try:
         input_ids, attention_mask = _left_pad_batch(tokenizer, prompts, device)
-        out = greedy_decode_batch(model, input_ids, attention_mask, tokenizer, max_new_tokens=max_new_tokens)
+        out = greedy_decode_batch(
+            model, input_ids, attention_mask, tokenizer, max_new_tokens=max_new_tokens,
+            stop_token_ids=stop_token_ids,
+        )
         prompt_len = input_ids.shape[1]
-        eos_id = tokenizer.eos_token_id
         results = []
         for row in out[:, prompt_len:]:
             ids = row.tolist()
-            if eos_id is not None and eos_id in ids:
-                ids = ids[: ids.index(eos_id) + 1]
+            stop_positions = [ids.index(sid) for sid in stop_token_ids if sid in ids]
+            if stop_positions:
+                ids = ids[: min(stop_positions) + 1]
             results.append(tokenizer.decode(ids, skip_special_tokens=True))
         return results
     except Exception as exc:

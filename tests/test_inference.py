@@ -13,9 +13,11 @@ nn = pytest.importorskip("torch.nn", reason="torch not installed in this environ
 from src.inference import (
     _left_pad_batch,
     _position_ids_from_mask,
+    _resolve_stop_token_ids,
     build_prompt,
     generate,
     generate_batch,
+    greedy_decode,
     greedy_decode_batch,
 )
 
@@ -67,6 +69,13 @@ class FakeTokenizer:
     def decode(self, ids, skip_special_tokens=True):
         return "decoded-output"
 
+    def encode(self, text, add_special_tokens=True):
+        # Single-token stand-in for a turn-closing marker, so
+        # _resolve_stop_token_ids' discovery succeeds realistically instead
+        # of degrading (this fake's chat template doesn't distinguish a
+        # real closing sequence from anything else, so any fixed id works).
+        return [9]
+
 
 class FakeCausalLM(nn.Module):
     """A minimal stand-in that either succeeds at manual greedy decode or fails it."""
@@ -94,10 +103,58 @@ class FakeCausalLM(nn.Module):
         out.logits = logits
         return out
 
-    def generate(self, input_ids=None, attention_mask=None, max_new_tokens=None, do_sample=None, pad_token_id=None):
+    def generate(
+        self, input_ids=None, attention_mask=None, max_new_tokens=None, do_sample=None,
+        pad_token_id=None, eos_token_id=None,
+    ):
         self.generate_called = True
         extra = torch.full((input_ids.shape[0], 2), 4, dtype=input_ids.dtype)
         return torch.cat([input_ids, extra], dim=-1)
+
+
+class TestResolveStopTokenIds:
+    def test_always_includes_eos_token_id(self):
+        assert _EOS_ID in _resolve_stop_token_ids(FakeTokenizer())
+
+    def test_discovers_the_turn_closing_token_when_it_is_a_single_token(self):
+        # FakeTokenizer's chat template renders "...<turn|>\n" after the
+        # assistant's content, and its encode() resolves any text to a
+        # single token id (9) — mirrors the real confirmed shape
+        # (eot_token "<turn|>" distinct from eos_token "<eos>").
+        result = _resolve_stop_token_ids(FakeTokenizer())
+        assert result == {_EOS_ID, 9}
+
+    def test_falls_back_to_eos_only_when_closing_sequence_is_multi_token(self):
+        class MultiTokenTokenizer(FakeTokenizer):
+            def encode(self, text, add_special_tokens=True):
+                return [9, 10]  # not a single token -> not safe to use as a stop id
+
+        assert _resolve_stop_token_ids(MultiTokenTokenizer()) == {_EOS_ID}
+
+    def test_falls_back_to_eos_only_when_template_rendering_raises(self):
+        class BrokenTemplateTokenizer(FakeTokenizer):
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+                raise RuntimeError("template broken")
+
+        assert _resolve_stop_token_ids(BrokenTemplateTokenizer()) == {_EOS_ID}
+
+    def test_falls_back_to_eos_only_when_encode_is_missing(self):
+        class NoEncodeTokenizer:
+            eos_token_id = _EOS_ID
+
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+                return "".join(f"<|turn>{m['role']}\n{m['content']}<turn|>\n" for m in messages)
+
+        assert _resolve_stop_token_ids(NoEncodeTokenizer()) == {_EOS_ID}
+
+    def test_no_eos_token_id_and_no_discoverable_closer_returns_empty_set(self):
+        class NoStopTokenizer:
+            eos_token_id = None
+
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+                raise RuntimeError("no template")
+
+        assert _resolve_stop_token_ids(NoStopTokenizer()) == set()
 
 
 class TestBuildPrompt:
@@ -139,6 +196,62 @@ class TestBuildPrompt:
 
         with pytest.raises(RuntimeError):
             build_prompt(BrokenTokenizer(), [{"role": "user", "content": "hi"}])
+
+
+class _FakeCausalLMAlwaysPredicts(nn.Module):
+    """Predicts a fixed token id every step, regardless of position — used to
+    prove greedy_decode's stop check works for a stop id other than
+    eos_token_id (the exact bug: the real model reliably predicts the
+    template's actual turn-closer, a token distinct from eos_token_id, and
+    a decode loop that only recognizes eos_token_id never stops)."""
+
+    def __init__(self, predicted_token_id: int):
+        super().__init__()
+        self._linear = nn.Linear(1, 1)
+        self.predicted_token_id = predicted_token_id
+
+    def gradient_checkpointing_disable(self):
+        pass
+
+    def forward(self, input_ids=None, attention_mask=None, use_cache=None):
+        class _Output:
+            pass
+
+        batch, seq_len = input_ids.shape
+        logits = torch.full((batch, seq_len, _VOCAB_SIZE), -10.0)
+        logits[:, -1, self.predicted_token_id] = 10.0
+        out = _Output()
+        out.logits = logits
+        return out
+
+
+class TestGreedyDecodeStopTokens:
+    _NON_EOS_STOP_ID = 3
+
+    def test_stops_on_a_discovered_non_eos_stop_token(self):
+        model = _FakeCausalLMAlwaysPredicts(self._NON_EOS_STOP_ID)
+        tokenizer = FakeTokenizer()
+        input_ids = torch.tensor([[1, 3, 4]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        out = greedy_decode(
+            model, input_ids, attention_mask, tokenizer, max_new_tokens=20,
+            stop_token_ids={self._NON_EOS_STOP_ID},
+        )
+        assert out.shape[1] == input_ids.shape[1] + 1
+
+    def test_without_the_extra_stop_token_runs_to_max_new_tokens(self):
+        # Same model, but no stop_token_ids given — reproduces the actual
+        # bug being fixed: a model that reliably closes its turn with a
+        # token other than eos_token_id, decoded by a loop that only knows
+        # eos_token_id, never stops and burns the full token budget.
+        model = _FakeCausalLMAlwaysPredicts(self._NON_EOS_STOP_ID)
+        tokenizer = FakeTokenizer()
+        input_ids = torch.tensor([[1, 3, 4]])
+        attention_mask = torch.tensor([[1, 1, 1]])
+
+        out = greedy_decode(model, input_ids, attention_mask, tokenizer, max_new_tokens=20)
+        assert out.shape[1] == input_ids.shape[1] + 20
 
 
 class TestGenerate:

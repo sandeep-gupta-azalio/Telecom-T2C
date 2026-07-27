@@ -1086,6 +1086,45 @@ special-token spelling. **This fix requires no retraining** — re-run
 Section 10 (Evaluate) or the inference-server notebook against your
 existing adapter to see the corrected numbers.
 
+**Confirmed with the `build_prompt()` fix above applied**: re-running the
+256-example val benchmark afterward jumped `exact_match_rate` from 1.95%
+to 99.6%, and every `pass_metrics` entry to 98-100% — the adapter was
+correct all along; it only needed the right prompt.
+
+**Generated text runs much longer than the gold reply and often
+degenerates into a repeated tail after the correct PASS_0-4 answer**
+(confirmed case, after the `build_prompt()` fix above: generated median
+length ~2x gold's, 12% of a 256-example run spiraling into a repeated
+"Please provide the deployment context..." tail). Doesn't affect
+`pass_metrics`/`exact_match_rate` — `evaluator`'s PASS parsers extract
+bounded sections by marker position, so trailing garbage after `PASS_4`'s
+JSON is ignored — but it wastes most of the generation-eval speedup from
+"Speeding up generation-based evaluation" above, since decoding runs close
+to `max_new_tokens_eval` on nearly every example instead of stopping
+early. Root cause, confirmed directly against
+`google/gemma-4-12B-it`'s `tokenizer_config.json`: `eos_token` is
+`"<eos>"`, a generic sequence-end token, but the chat template's actual
+turn-closing marker is a **separate** field, `"eot_token": "<turn|>"`.
+`inference.greedy_decode`/`greedy_decode_batch` only ever checked
+`tokenizer.eos_token_id` — the model reliably predicts `<turn|>` (that's
+what training targets), but the decode loop never recognized it as a stop
+signal, so generation always ran to the full `max_new_tokens` budget even
+after producing a fully correct answer. Fixed via
+`inference._resolve_stop_token_ids()`: rather than hardcode the literal
+`"<turn|>"` (fragile if the template changes upstream, and not
+necessarily correct for a different model), it discovers the real
+closing token the same way `build_prompt()` discovers the prompt prefix —
+render a short conversation ending in a real assistant turn with
+`add_generation_prompt=False` via a unique sentinel, then tokenize
+whatever immediately follows that sentinel in the rendered text. Only
+used as a stop id when it resolves to exactly one token (a multi-token
+closing sequence isn't safe to stop on after a single argmax step —
+degrades to `eos_token_id` alone with a logged warning in that case).
+Wired through both `greedy_decode` and the batched `greedy_decode_batch`,
+plus `model.generate()`'s fallback path (`eos_token_id=` now accepts the
+full discovered set, not just the tokenizer's own single default).
+**Also requires no retraining** — purely a decode-loop fix.
+
 **`ValueError: Incorrect image source. Must be a valid URL starting with
 `http://` or `https://`, a valid path to an image file, or a base64
 encoded string. Got <bos><|turn>system...`** during Section 12 (Smoke
