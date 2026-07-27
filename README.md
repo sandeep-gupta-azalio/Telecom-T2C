@@ -460,6 +460,50 @@ Dataset, Run Benchmark. Writes `benchmark_report.json` and
 `<source>_predictions.jsonl` back into the *same* Drive run directory the
 adapter came from, alongside `adapter/`.
 
+## Speeding up generation-based evaluation
+
+Generation-eval (val/golden `exact_match_rate` + `pass_metrics`) was slow
+enough to be impractical for iterating on a fix — 256 examples run
+sequentially through an uncached, one-at-a-time greedy-decode loop. Four
+independent levers, all on by default now:
+
+- **The model is already 4-bit quantized** (`load_in_4bit=True` via
+  Unsloth, unchanged since the first training run) — there's no further
+  weight-quantization lever to pull; the slowness was elsewhere.
+- **`evaluation.fast_decode: true`**: `inference.greedy_decode` keeps a KV
+  cache and feeds only the newest token each step, instead of
+  re-forwarding the whole sequence every step (`use_cache=False`, the
+  original notebook's Gemma+PEFT `model.generate()` workaround, which is
+  O(n²) — 512 new tokens over a ~500-token prompt costs ~380x the compute
+  of cached decoding). Mathematically identical output (same argmax over
+  the same logits), just far less compute. Set `false` to restore the
+  original uncached loop if this ever needs debugging in isolation.
+- **`evaluation.max_new_tokens_eval: 400`**: lowered from `512` after
+  measuring real gold PASS_0-4 response lengths (median ~190 tokens, p99
+  ~325, max ~330, from a real `val_predictions.jsonl`) — `512` was nearly
+  2x oversized for the actual task and only mattered when generation
+  didn't hit EOS early.
+- **`evaluation.generation_batch_size: 8`**: `evaluator.generate_predictions()`
+  now decodes this many examples per forward-pass batch
+  (`inference.generate_batch`/`greedy_decode_batch`) instead of one at a
+  time — the single biggest lever, since 256 sequential decode loops
+  become 32 batched ones. Prompts are left-padded (required so every row's
+  "next token to generate" lines up at the same trailing column) with
+  `position_ids` computed explicitly from the attention mask (this
+  project's manual decode loop bypasses transformers'
+  `prepare_inputs_for_generation`, so nothing else derives them — getting
+  this wrong for a left-padded row silently shifts its positions rather
+  than crashing, so it's computed the same way transformers' own
+  generation utilities do it). A row that reaches EOS is frozen at
+  `pad_token_id` for the rest of that batch's steps rather than removed
+  from the batch. Lower this if it OOMs on a smaller GPU (a 16GB T4 in
+  particular); raise it on more VRAM. Set to `1` to fall back to the
+  original one-at-a-time path. `notebooks/Telecom_T2C_Benchmark.ipynb`'s
+  `MAX_EVAL_SAMPLES_OVERRIDE` (Section 5) is also worth setting low (e.g.
+  `32`) while iterating on a fix, independent of these four — no need to
+  wait through a full 256-example run just to check whether a change
+  helped.
+
 ---
 
 ## Testing the fine-tuned adapter from your own PC

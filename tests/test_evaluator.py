@@ -6,10 +6,13 @@ tests/fixtures/sample_train.jsonl) — this module has no import dependency
 on t2c itself, so the shape is reproduced literally rather than generated.
 """
 
+import pytest
+
 from src.evaluator import (
     PassAccuracy,
     PredictionRecord,
     evaluate_passes,
+    generate_predictions,
     parse_pass0_normalizations,
     parse_pass1_lexemes,
     parse_pass2_intent,
@@ -177,3 +180,63 @@ class TestEvaluatePasses:
         report = evaluate_passes([correct, wrong])
         assert report["PASS_2"].accuracy == 0.5
         assert report["PASS_2"].num_scored == 2
+
+
+def _dataset_row(query: str) -> dict:
+    return {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": query},
+            {"role": "assistant", "content": GOLD_TEXT},
+        ]
+    }
+
+
+class TestGeneratePredictions:
+    def test_batch_size_one_calls_decode_fn_once_per_example(self):
+        calls = []
+
+        def decode_fn(model, tokenizer, prompt_messages, max_new_tokens):
+            calls.append(prompt_messages)
+            return GOLD_TEXT
+
+        dataset = [_dataset_row("q1"), _dataset_row("q2")]
+        records = generate_predictions(object(), object(), dataset, 100, decode_fn)
+
+        assert len(records) == 2
+        assert len(calls) == 2
+        assert all(r.exact_match == 1.0 for r in records)
+
+    def test_batch_size_greater_than_one_requires_batch_decode_fn(self):
+        def decode_fn(model, tokenizer, prompt_messages, max_new_tokens):
+            return GOLD_TEXT
+
+        with pytest.raises(ValueError):
+            generate_predictions(object(), object(), [_dataset_row("q1")], 100, decode_fn, batch_size=4)
+
+    def test_batches_examples_into_chunks_of_batch_size(self):
+        batch_calls = []
+
+        def decode_fn(model, tokenizer, prompt_messages, max_new_tokens):
+            raise AssertionError("decode_fn should not be used when batch_size > 1")
+
+        def batch_decode_fn(model, tokenizer, prompt_messages_batch, max_new_tokens):
+            batch_calls.append(len(prompt_messages_batch))
+            return [GOLD_TEXT] * len(prompt_messages_batch)
+
+        dataset = [_dataset_row(f"q{i}") for i in range(5)]
+        records = generate_predictions(
+            object(), object(), dataset, 100, decode_fn, batch_size=2, batch_decode_fn=batch_decode_fn
+        )
+
+        assert len(records) == 5
+        assert batch_calls == [2, 2, 1]  # 5 examples in batches of 2 -> 2, 2, 1
+        assert all(r.exact_match == 1.0 for r in records)
+
+    def test_skips_conversations_not_ending_on_assistant_turn(self):
+        def decode_fn(model, tokenizer, prompt_messages, max_new_tokens):
+            return GOLD_TEXT
+
+        dataset = [_dataset_row("q1"), {"messages": [{"role": "user", "content": "no reply"}]}]
+        records = generate_predictions(object(), object(), dataset, 100, decode_fn)
+        assert len(records) == 1

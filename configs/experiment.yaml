@@ -107,9 +107,15 @@ evaluation:
   early_stopping_threshold: 0.0
   metric_for_best_model: eval_loss
   greater_is_better: false
-  max_new_tokens_eval: 512
+  max_new_tokens_eval: 400                   # real gold PASS_0-4 responses: median ~190 tokens, p99 ~325,
+                                              # max ~330 (measured against a real val_predictions.jsonl) —
+                                              # 400 covers that with margin without wasting decode steps
+                                              # on a 512 ceiling nothing actually needs
   fast_decode: true                          # cached incremental decoding; same tokens, ~100x faster
                                              # eval. Set false to restore the uncached notebook loop
+  generation_batch_size: 8                   # decode this many examples per forward-pass batch instead
+                                              # of one at a time — the biggest generation-eval speedup;
+                                              # lower if this OOMs (e.g. on a 16GB T4), raise on more VRAM
 
 # -----------------------------------------------------------------------------
 # wandb: Weights & Biases logging. Gracefully disables itself if unavailable

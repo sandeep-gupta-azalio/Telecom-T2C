@@ -109,6 +109,14 @@ class EvaluationConfig:
     # identical to the default full-resequence loop but ~100x faster; opt-in
     # because disabling the cache was a deliberate Gemma+PEFT workaround.
     fast_decode: bool = False
+    # Number of examples decoded together per forward-pass batch in
+    # evaluator.generate_predictions (via inference.generate_batch). 1 =
+    # unchanged one-at-a-time behavior. >1 left-pads prompts and decodes
+    # them together — the single biggest generation-eval speedup available,
+    # since a 256-example run was otherwise 256 fully sequential decode
+    # loops. Tune down if this OOMs on a smaller GPU (T4 16GB); tune up on
+    # more VRAM.
+    generation_batch_size: int = 1
 
 
 @dataclass

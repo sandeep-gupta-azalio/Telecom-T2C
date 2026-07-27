@@ -313,36 +313,60 @@ def _prepare_prompt_and_gold(messages: list[dict]) -> Optional[tuple[list[dict],
     return messages[:-1], messages[-1].get("content", "")
 
 
+def _build_prediction_record(prompt_messages: list[dict], generated: str, gold: str) -> PredictionRecord:
+    return PredictionRecord(
+        prompt=json.dumps(prompt_messages, ensure_ascii=False),
+        generated=generated,
+        gold=gold,
+        exact_match=cypher_exact_match(generated, gold),
+    )
+
+
 def generate_predictions(
     model: Any,
     tokenizer: Any,
     dataset: Any,
     max_new_tokens: int,
     decode_fn: Callable[[Any, Any, list[dict], int], str],
+    batch_size: int = 1,
+    batch_decode_fn: Optional[Callable[[Any, Any, list[list[dict]], int], list[str]]] = None,
 ) -> list[PredictionRecord]:
     """Generate a prediction for each example's final assistant turn and score it.
 
     decode_fn(model, tokenizer, prompt_messages, max_new_tokens) -> str is
     injected by the caller (trainer.py / benchmark.py wire in
     inference.generate) so this module never imports inference.py directly.
+
+    batch_size > 1 groups examples into batches and calls batch_decode_fn
+    (required in that case — inference.generate_batch is the canonical
+    implementation) instead of decode_fn once per example, which is what
+    makes a 256-example generation-eval run take minutes instead of tens of
+    minutes on a single GPU. batch_size == 1 (the default) is unchanged
+    behavior — existing callers passing only decode_fn are unaffected.
+    Scoring/record-building is identical either way.
     """
-    records: list[PredictionRecord] = []
+    if batch_size > 1 and batch_decode_fn is None:
+        raise ValueError("batch_size > 1 requires batch_decode_fn (e.g. inference.generate_batch).")
+
+    prepared: list[tuple[list[dict], str]] = []
     for example in dataset:
         messages = example["messages"] if isinstance(example, dict) else example["messages"]
         split = _prepare_prompt_and_gold(list(messages))
-        if split is None:
-            continue
-        prompt_messages, gold = split
-        generated = decode_fn(model, tokenizer, prompt_messages, max_new_tokens)
-        score = cypher_exact_match(generated, gold)
-        records.append(
-            PredictionRecord(
-                prompt=json.dumps(prompt_messages, ensure_ascii=False),
-                generated=generated,
-                gold=gold,
-                exact_match=score,
-            )
-        )
+        if split is not None:
+            prepared.append(split)
+
+    records: list[PredictionRecord] = []
+    if batch_size <= 1:
+        for prompt_messages, gold in prepared:
+            generated = decode_fn(model, tokenizer, prompt_messages, max_new_tokens)
+            records.append(_build_prediction_record(prompt_messages, generated, gold))
+        return records
+
+    for start in range(0, len(prepared), batch_size):
+        chunk = prepared[start : start + batch_size]
+        generated_list = batch_decode_fn(model, tokenizer, [p for p, _ in chunk], max_new_tokens)
+        for (prompt_messages, gold), generated in zip(chunk, generated_list):
+            records.append(_build_prediction_record(prompt_messages, generated, gold))
     return records
 
 

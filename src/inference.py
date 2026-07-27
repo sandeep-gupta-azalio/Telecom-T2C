@@ -229,6 +229,150 @@ def generate(
         return tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
 
 
+def _left_pad_batch(tokenizer: Any, prompts: list[str], device: Any) -> tuple[Any, Any]:
+    """Tokenize prompts and left-pad them to a common length.
+
+    Left-padding (not this project's training-time padding_side="right") is
+    required for batched generation: every row's "next token to generate"
+    must sit at the same trailing column so a single argmax over the whole
+    batch's last-position logits is valid. Padding is done manually here
+    rather than by flipping tokenizer.padding_side, to avoid mutating
+    shared tokenizer state other callers (training) depend on being "right".
+    """
+    import torch
+
+    pad_id = tokenizer.pad_token_id
+    encoded = [tokenizer(text=p, return_tensors="pt")["input_ids"][0] for p in prompts]
+    max_len = max(e.shape[0] for e in encoded)
+
+    input_ids = torch.full((len(encoded), max_len), pad_id, dtype=encoded[0].dtype)
+    attention_mask = torch.zeros((len(encoded), max_len), dtype=torch.long)
+    for i, ids in enumerate(encoded):
+        n = ids.shape[0]
+        input_ids[i, max_len - n :] = ids
+        attention_mask[i, max_len - n :] = 1
+    return input_ids.to(device), attention_mask.to(device)
+
+
+def _position_ids_from_mask(attention_mask: Any) -> Any:
+    """Derive position_ids from a (possibly left-padded) attention mask.
+
+    Matches transformers' own GenerationMixin.prepare_inputs_for_generation
+    logic. This project's manual decode loop bypasses that method entirely
+    (the documented Gemma+PEFT model.generate() workaround), so nothing
+    else computes this — left without it, a model may default to
+    torch.arange(seq_len) internally, which is wrong for left-padded rows
+    (their real content doesn't start at position 0) and produces
+    plausible-looking but incorrect output, not an obvious crash.
+    """
+    position_ids = attention_mask.long().cumsum(-1) - 1
+    position_ids.masked_fill_(attention_mask == 0, 1)
+    return position_ids
+
+
+def greedy_decode_batch(
+    model: Any,
+    input_ids: Any,
+    attention_mask: Any,
+    tokenizer: Any,
+    max_new_tokens: int = 512,
+) -> Any:
+    """Batched greedy decode with a KV cache — the batched counterpart to
+    greedy_decode(fast=True) (always cached; batching an uncached O(n^2)
+    loop isn't worth the added code path).
+
+    A sequence that reaches EOS is "frozen": its next token is forced to
+    pad_token_id for every remaining step rather than removing it from the
+    batch (removing a row mid-batch would mean re-slicing every tensor,
+    including past_key_values, which is more failure-prone than just
+    padding it out and truncating the result afterward in generate_batch()).
+    Its continued presence doesn't affect other rows — batched attention is
+    per-row/independent as long as attention_mask/position_ids are correct,
+    which they are.
+    """
+    import torch
+
+    model.eval()
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+
+    eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id
+    batch_size = input_ids.shape[0]
+    finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+
+    generated = input_ids
+    attn = attention_mask
+    past = None
+    step_ids = generated
+    step_position_ids = _position_ids_from_mask(attn)
+
+    with torch.inference_mode():
+        for _ in range(max_new_tokens):
+            outputs = model(
+                input_ids=step_ids,
+                attention_mask=attn,
+                position_ids=step_position_ids,
+                use_cache=True,
+                past_key_values=past,
+            )
+            past = outputs.past_key_values
+            next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            if eos_id is not None and pad_id is not None:
+                next_token = torch.where(finished.unsqueeze(1), torch.full_like(next_token, pad_id), next_token)
+            generated = torch.cat([generated, next_token], dim=-1)
+            attn = torch.cat([attn, torch.ones_like(next_token, dtype=attn.dtype)], dim=-1)
+            if eos_id is not None:
+                finished = finished | (next_token.squeeze(1) == eos_id)
+            if bool(finished.all()):
+                break
+            step_ids = next_token
+            step_position_ids = step_position_ids[:, -1:] + 1
+
+    return generated
+
+
+def generate_batch(
+    model: Any,
+    tokenizer: Any,
+    messages_batch: list[list[dict]],
+    max_new_tokens: int = 512,
+) -> list[str]:
+    """Generate completions for a batch of prompt-turn lists in one forward-pass batch.
+
+    The batched counterpart to generate() — same build_prompt() +
+    greedy-decode-then-fallback structure, but decodes every example in
+    messages_batch together instead of one sequential call per example.
+    On any failure in the batched path, falls back to generate() one
+    example at a time (matches generate()'s own model.generate() fallback
+    philosophy: a decode-path failure should degrade the eval loop's
+    speed, not crash it outright).
+    """
+    if not messages_batch:
+        return []
+
+    device = _infer_device(model)
+    prompts = [build_prompt(tokenizer, m) for m in messages_batch]
+
+    try:
+        input_ids, attention_mask = _left_pad_batch(tokenizer, prompts, device)
+        out = greedy_decode_batch(model, input_ids, attention_mask, tokenizer, max_new_tokens=max_new_tokens)
+        prompt_len = input_ids.shape[1]
+        eos_id = tokenizer.eos_token_id
+        results = []
+        for row in out[:, prompt_len:]:
+            ids = row.tolist()
+            if eos_id is not None and eos_id in ids:
+                ids = ids[: ids.index(eos_id) + 1]
+            results.append(tokenizer.decode(ids, skip_special_tokens=True))
+        return results
+    except Exception as exc:
+        logger.warning(
+            "greedy_decode_batch failed (%s) — falling back to one-at-a-time generate().", exc
+        )
+        return [generate(model, tokenizer, m, max_new_tokens=max_new_tokens, fast=True) for m in messages_batch]
+
+
 def run_smoke_test(model: Any, tokenizer: Any, sample_messages: list[dict], max_new_tokens: int = 512) -> str:
     """Generate from sample_messages and print the result (notebook section 13 tail)."""
     generated = generate(model, tokenizer, sample_messages, max_new_tokens=max_new_tokens)

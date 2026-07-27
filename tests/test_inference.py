@@ -10,7 +10,14 @@ import pytest
 torch = pytest.importorskip("torch", reason="torch not installed in this environment")
 nn = pytest.importorskip("torch.nn", reason="torch not installed in this environment")
 
-from src.inference import build_prompt, generate
+from src.inference import (
+    _left_pad_batch,
+    _position_ids_from_mask,
+    build_prompt,
+    generate,
+    generate_batch,
+    greedy_decode_batch,
+)
 
 _EOS_ID = 2
 _VOCAB_SIZE = 5
@@ -148,3 +155,133 @@ class TestGenerate:
         result = generate(model, tokenizer, [{"role": "user", "content": "hi"}], max_new_tokens=5)
         assert result == "decoded-output"
         assert model.generate_called is True
+
+
+class TestPositionIdsFromMask:
+    def test_no_padding_is_a_plain_arange(self):
+        mask = torch.tensor([[1, 1, 1]])
+        assert _position_ids_from_mask(mask).tolist() == [[0, 1, 2]]
+
+    def test_left_padding_starts_real_tokens_at_zero(self):
+        mask = torch.tensor([[0, 0, 1, 1, 1]])
+        # Padded slots get masked_fill'd to 1 (transformers' own convention);
+        # real content still starts counting at 0 from its own first token.
+        assert _position_ids_from_mask(mask).tolist() == [[1, 1, 0, 1, 2]]
+
+    def test_batch_rows_with_different_padding_amounts(self):
+        mask = torch.tensor([[0, 1, 1], [1, 1, 1]])
+        assert _position_ids_from_mask(mask).tolist() == [[1, 0, 1], [0, 1, 2]]
+
+
+class _VarLenTokenizer:
+    """Minimal tokenizer stand-in whose __call__ length varies with the prompt,
+    so _left_pad_batch has genuinely different lengths to pad."""
+
+    pad_token_id = 0
+
+    def __call__(self, text=None, return_tensors="pt"):
+        n = len(text.split())
+        return {"input_ids": torch.tensor([[7] * n])}
+
+
+class TestLeftPadBatch:
+    def test_pads_shorter_prompts_on_the_left(self):
+        tokenizer = _VarLenTokenizer()
+        input_ids, attention_mask = _left_pad_batch(tokenizer, ["a b c", "a"], device="cpu")
+        assert input_ids.shape == (2, 3)
+        assert input_ids[0].tolist() == [7, 7, 7]
+        assert input_ids[1].tolist() == [0, 0, 7]
+        assert attention_mask[0].tolist() == [1, 1, 1]
+        assert attention_mask[1].tolist() == [0, 0, 1]
+
+
+class FakeBatchCausalLM(nn.Module):
+    """Row i emits EOS after exactly targets[i] new tokens (else a filler
+    token), letting tests verify a finished row freezes at pad_token_id
+    while other rows keep decoding — the interaction greedy_decode_batch's
+    `finished` bookkeeping exists for.
+    """
+
+    def __init__(self, targets: list[int]):
+        super().__init__()
+        self._linear = nn.Linear(1, 1)
+        self.targets = targets
+        self.calls = 0
+
+    def gradient_checkpointing_disable(self):
+        pass
+
+    def forward(self, input_ids=None, attention_mask=None, position_ids=None, use_cache=None, past_key_values=None):
+        self.calls += 1
+        step = self.calls - 1  # call #1 (the prompt call) produces the 1st new token -> step 0
+
+        class _Output:
+            pass
+
+        batch = input_ids.shape[0]
+        logits = torch.full((batch, input_ids.shape[1], _VOCAB_SIZE), -10.0)
+        for row in range(batch):
+            token = _EOS_ID if step >= self.targets[row] - 1 else 3
+            logits[row, -1, token] = 10.0
+        out = _Output()
+        out.logits = logits
+        out.past_key_values = "fake-cache"
+        return out
+
+
+class FakeBatchTokenizer(FakeTokenizer):
+    def decode(self, ids, skip_special_tokens=True):
+        return ",".join(str(i) for i in ids)
+
+
+class TestGreedyDecodeBatch:
+    def test_finished_row_freezes_at_pad_while_other_row_keeps_going(self):
+        model = FakeBatchCausalLM(targets=[1, 3])
+        tokenizer = FakeBatchTokenizer()
+        input_ids = torch.tensor([[1, 5, 6], [1, 5, 6]])
+        attention_mask = torch.ones_like(input_ids)
+
+        out = greedy_decode_batch(model, input_ids, attention_mask, tokenizer, max_new_tokens=10)
+
+        prompt_len = input_ids.shape[1]
+        row0_new = out[0, prompt_len:].tolist()
+        row1_new = out[1, prompt_len:].tolist()
+
+        assert row0_new[0] == _EOS_ID
+        assert all(t == tokenizer.pad_token_id for t in row0_new[1:])
+        assert row1_new[:3] == [3, 3, _EOS_ID]
+
+    def test_stops_once_every_row_has_reached_eos(self):
+        model = FakeBatchCausalLM(targets=[1, 1])
+        tokenizer = FakeBatchTokenizer()
+        input_ids = torch.tensor([[1, 5], [1, 5]])
+        attention_mask = torch.ones_like(input_ids)
+
+        out = greedy_decode_batch(model, input_ids, attention_mask, tokenizer, max_new_tokens=50)
+
+        # Both rows finish after 1 new token — loop must not run all 50 steps.
+        assert out.shape[1] == input_ids.shape[1] + 1
+
+
+class TestGenerateBatch:
+    def test_empty_batch_returns_empty_list(self):
+        model = FakeCausalLM()
+        tokenizer = FakeTokenizer()
+        assert generate_batch(model, tokenizer, [], max_new_tokens=5) == []
+
+    def test_falls_back_to_generate_one_at_a_time_on_batched_failure(self):
+        model = FakeCausalLM(fail_forward=False)
+        tokenizer = FakeTokenizer()
+        messages_batch = [
+            [{"role": "user", "content": "hi"}],
+            [{"role": "user", "content": "there"}],
+        ]
+
+        # FakeCausalLM.forward() doesn't accept position_ids/past_key_values
+        # (only input_ids/attention_mask/use_cache) — greedy_decode_batch
+        # always passes them, so this raises a TypeError inside the batched
+        # path, exactly the "batched path failed" case generate_batch must
+        # degrade from (fall back to generate() per example) rather than
+        # propagate.
+        result = generate_batch(model, tokenizer, messages_batch, max_new_tokens=5)
+        assert result == ["decoded-output", "decoded-output"]

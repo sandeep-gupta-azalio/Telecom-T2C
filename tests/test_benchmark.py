@@ -95,3 +95,29 @@ class TestRunBenchmarkPassMetrics:
             fallback_dataset=_fake_dataset(1), fallback_dataset_name="val",
         )
         assert report.predictions_path.endswith("val_predictions.jsonl")
+
+    def test_uses_batched_decode_when_generation_batch_size_configured(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            inference, "load_model_for_inference", lambda model_config, max_seq_length, adapter_dir, hf_token: (object(), object())
+        )
+        batch_calls = []
+
+        def fake_generate_batch(model, tokenizer, messages_batch, max_new_tokens=512):
+            batch_calls.append(len(messages_batch))
+            return [_GOLD_TEXT] * len(messages_batch)
+
+        monkeypatch.setattr(inference, "generate_batch", fake_generate_batch)
+        # decode_fn (single-example) must NOT be used at all once batching kicks in.
+        monkeypatch.setattr(
+            inference, "generate", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not be called"))
+        )
+
+        config = ExperimentConfig()
+        config.evaluation.generation_batch_size = 3
+        report = benchmark.run_benchmark(
+            config, tmp_path / "adapter", tmp_path, golden_dataset=_fake_dataset(5),
+        )
+
+        assert batch_calls == [3, 2]
+        assert report.golden_metrics["exact_match_rate"] == 1.0
+        assert report.golden_metrics["num_examples"] == 5

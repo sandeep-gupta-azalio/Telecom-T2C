@@ -88,6 +88,8 @@ def run_benchmark(
             decode_fn=functools.partial(
                 inference.generate, fast=config.evaluation.fast_decode
             ),
+            batch_size=config.evaluation.generation_batch_size,
+            batch_decode_fn=inference.generate_batch,
         )
         scores = [p.exact_match for p in predictions if p.exact_match is not None]
         golden_metrics = {
