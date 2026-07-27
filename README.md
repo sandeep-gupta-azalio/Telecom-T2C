@@ -534,7 +534,7 @@ machine reaches it.
 
 ## Running the fine-tuned model in Ollama
 
-`notebooks/Telecom_T2C_Inference_Server.ipynb`'s Section 10 (Export to
+`notebooks/Telecom_T2C_Inference_Server.ipynb`'s Section 6 (Export to
 GGUF) is an alternative to the ngrok server above: it exports the loaded
 model + adapter as a single merged, quantized `.gguf` file via Unsloth's
 `model.save_pretrained_gguf(...)`, for running with
