@@ -28,8 +28,16 @@ class FakeTokenizer:
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
         if tokenize:
             return [1, 2, 3]
-        prompt = " | ".join(m["content"] for m in messages)
-        return f"PROMPT:{prompt}"
+        rendered = "".join(f"<|turn>{m['role']}\n{m['content']}<turn|>\n" for m in messages)
+        if add_generation_prompt:
+            # Mirrors the REAL quirk this stand-in guards against: for
+            # google/gemma-4-12B-it specifically, add_generation_prompt=True
+            # opens a "thinking" channel that training data never
+            # demonstrates continuing from (confirmed via direct Colab
+            # diagnostic — see README Troubleshooting and build_prompt's
+            # docstring). build_prompt() must never produce this suffix.
+            rendered += "<|turn>model\n<|channel>thought\n<channel|>"
+        return rendered
 
     def __call__(self, images=None, *, text=None, return_tensors="pt"):
         # Mirrors the REAL bug this stand-in guards against: Gemma 4 is
@@ -86,10 +94,44 @@ class FakeCausalLM(nn.Module):
 
 
 class TestBuildPrompt:
-    def test_uses_chat_template_with_generation_prompt(self):
+    def test_ends_right_after_assistant_turn_header(self):
         tokenizer = FakeTokenizer()
         result = build_prompt(tokenizer, [{"role": "user", "content": "hi"}])
-        assert result == "PROMPT:hi"
+        assert result == "<|turn>user\nhi<turn|>\n<|turn>assistant\n"
+
+    def test_preserves_multiple_prior_turns(self):
+        tokenizer = FakeTokenizer()
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+        result = build_prompt(tokenizer, messages)
+        assert result == "<|turn>system\ns<turn|>\n<|turn>user\nq<turn|>\n<|turn>assistant\n"
+
+    def test_never_opens_the_thinking_channel(self):
+        # The regression this function exists to prevent: add_generation_prompt=True
+        # would append "<|channel>thought\n<channel|>" for this template, a
+        # suffix training data never demonstrates continuing from.
+        tokenizer = FakeTokenizer()
+        result = build_prompt(tokenizer, [{"role": "user", "content": "hi"}])
+        assert "<|channel>thought" not in result
+        assert "<|channel>" not in result
+
+    def test_calls_apply_chat_template_with_add_generation_prompt_false(self):
+        calls = []
+
+        class RecordingTokenizer(FakeTokenizer):
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+                calls.append(add_generation_prompt)
+                return super().apply_chat_template(messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt)
+
+        build_prompt(RecordingTokenizer(), [{"role": "user", "content": "hi"}])
+        assert calls == [False]
+
+    def test_raises_if_sentinel_not_found_in_rendered_output(self):
+        class BrokenTokenizer:
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+                return "no sentinel here"
+
+        with pytest.raises(RuntimeError):
+            build_prompt(BrokenTokenizer(), [{"role": "user", "content": "hi"}])
 
 
 class TestGenerate:

@@ -990,6 +990,40 @@ documented workaround for a known Gemma+PEFT+transformers `model.generate()`
 bug) and falls back to `model.generate(do_sample=False)` on any exception,
 logging a warning either way — check the logs to see which path ran.
 
+**Fine-tuned model generates garbled/prose text instead of PASS_0-4,
+despite a very low `val_metrics.eval_loss`** (confirmed case: `eval_loss`
+0.036, but `golden_metrics.exact_match_rate` 1.95% and `pass_metrics`
+showing PASS_3/PASS_4 accuracy near zero, with the literal word `"system"`
+spliced into generated text ~5 times per example on average, always at
+structural boundaries like `"LOOKUPsystem\n\nPASS_3"` where a blank line
+belonged). The low eval_loss (teacher-forced, computed with the *correct*
+prior tokens fed in) proves the adapter itself learned the task correctly
+— this is **not** a training/data-quality problem. Root cause, confirmed
+via a live Colab diagnostic (compare a training-style render,
+`apply_chat_template(messages, add_generation_prompt=False)`, against
+`inference.build_prompt()`'s actual output): `google/gemma-4-12B-it`'s
+chat template opens a native **thinking-mode channel**
+(`<|channel>thought\n<channel|>`) whenever `add_generation_prompt=True` is
+used — but `trainer.train()` renders every training conversation with
+`add_generation_prompt=False`, so the model never once sees an assistant
+turn that continues from that channel-opener; every training example's
+assistant content follows `<|turn>model\n` *immediately*, with no channel
+wrapper at all. Every actual inference call was therefore feeding the
+model a prompt suffix completely outside its training distribution, which
+produced free-form/prose continuations mixed with fragments of the
+learned PASS_0-4 structure — explaining both the partial recovery on
+simple early passes (PASS_0/PASS_2, ~79-81% accuracy) and the near-total
+failure on later, more structure-dependent passes (PASS_3/PASS_4). Fixed
+in `inference.build_prompt()`: instead of `add_generation_prompt=True`, it
+renders the full conversation with `add_generation_prompt=False` (the
+exact call `trainer.train()` uses) plus a placeholder final assistant turn
+holding a unique sentinel, then truncates the rendered text right before
+that sentinel — reproducing byte-for-byte what a real assistant turn's
+prompt looks like in training, without hardcoding this template's
+special-token spelling. **This fix requires no retraining** — re-run
+Section 10 (Evaluate) or the inference-server notebook against your
+existing adapter to see the corrected numbers.
+
 **`ValueError: Incorrect image source. Must be a valid URL starting with
 `http://` or `https://`, a valid path to an image file, or a base64
 encoded string. Got <bos><|turn>system...`** during Section 12 (Smoke

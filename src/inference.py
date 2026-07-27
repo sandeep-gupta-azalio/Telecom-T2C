@@ -63,9 +63,47 @@ def load_model_for_inference(
     return model, tokenizer
 
 
+_PROMPT_SENTINEL = "\x00__T2C_BUILD_PROMPT_SENTINEL__\x00"
+
+
 def build_prompt(tokenizer: Any, messages: list[dict]) -> str:
-    """Format a prompt-only message list with a generation prompt appended."""
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    """Format a prompt-only message list ending right where the assistant should continue.
+
+    Deliberately does NOT use apply_chat_template(..., add_generation_prompt=True)
+    — confirmed via direct Colab diagnostic (see README Troubleshooting,
+    "Fine-tuned model generates garbled/prose text instead of PASS_0-4") that
+    for google/gemma-4-12B-it specifically, add_generation_prompt=True appends
+    "<|channel>thought\\n<channel|>", opening Gemma 4's native thinking-mode
+    channel. Training never demonstrates continuing from that: trainer.train()
+    renders full conversations with add_generation_prompt=False, and every
+    assistant turn in this dataset is bare PASS_0-4 text immediately following
+    the turn header, with no channel wrapper. Feeding that unfamiliar suffix
+    at inference produced garbled, prose-like generations mixed with
+    fragments of the trained PASS_0-4 structure — confirmed empirically
+    (exact_match_rate 1.95%, PASS_3 accuracy 0.4%, the literal word "system"
+    spliced into generated text ~5x per example on average).
+
+    Instead, renders the full conversation with add_generation_prompt=False
+    (the exact call trainer.train() uses) plus a placeholder final assistant
+    turn holding a unique sentinel, then truncates the rendered text right
+    before that sentinel — giving a prompt that ends exactly where a real
+    training example's assistant turn begins, byte-for-byte, without
+    hardcoding this template's special-token spelling (robust to the
+    template changing upstream, unlike splicing in a literal "<|turn>model\\n").
+    """
+    rendered = tokenizer.apply_chat_template(
+        list(messages) + [{"role": "assistant", "content": _PROMPT_SENTINEL}],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    prefix, separator, _ = rendered.partition(_PROMPT_SENTINEL)
+    if not separator:
+        raise RuntimeError(
+            "build_prompt(): sentinel not found in the rendered chat template — this "
+            "tokenizer's apply_chat_template may not render assistant content verbatim "
+            "(e.g. it escapes/transforms it). Inspect the rendered template directly."
+        )
+    return prefix
 
 
 def _infer_device(model: Any) -> Any:
@@ -78,13 +116,23 @@ def greedy_decode(
     attention_mask: Optional[Any],
     tokenizer: Any,
     max_new_tokens: int = 512,
+    fast: bool = False,
 ) -> Any:
     """Manual greedy per-token decode loop — verbatim port of notebook section 13.
 
     Workaround for a known bug where `model.generate()` misbehaves with
     Gemma + PEFT + certain transformers versions. Disables gradient
-    checkpointing and KV cache for the duration of the loop (use_cache=False
-    on every forward call, matching the notebook exactly).
+    checkpointing for the duration of the loop.
+
+    With ``fast=False`` (default) the whole sequence is re-forwarded every step
+    with ``use_cache=False``, matching the notebook exactly. That is O(n^2):
+    512 new tokens over a ~500-token prompt costs ~380x the compute of cached
+    decoding, which is what makes generation-based eval crawl.
+
+    With ``fast=True`` the KV cache is kept and only the newest token is fed
+    each step. The emitted tokens are identical — it is the same argmax over
+    the same logits — but it re-enables the cache the original workaround
+    deliberately avoided, so it stays opt-in via evaluation.fast_decode.
     """
     import torch
 
@@ -97,24 +145,48 @@ def greedy_decode(
     eos_id = tokenizer.eos_token_id
 
     with torch.inference_mode():
+        if not fast:
+            for _ in range(max_new_tokens):
+                outputs = model(input_ids=generated, attention_mask=attn, use_cache=False)
+                next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                generated = torch.cat([generated, next_token], dim=-1)
+                if attn is not None:
+                    attn = torch.cat([attn, torch.ones_like(next_token, dtype=attn.dtype)], dim=-1)
+                if eos_id is not None and int(next_token[0, 0]) == int(eos_id):
+                    break
+            return generated
+
+        past = None
+        step_ids = generated
         for _ in range(max_new_tokens):
-            outputs = model(input_ids=generated, attention_mask=attn, use_cache=False)
-            logits = outputs.logits
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            outputs = model(
+                input_ids=step_ids, attention_mask=attn, use_cache=True, past_key_values=past
+            )
+            past = outputs.past_key_values
+            next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, next_token], dim=-1)
             if attn is not None:
                 attn = torch.cat([attn, torch.ones_like(next_token, dtype=attn.dtype)], dim=-1)
             if eos_id is not None and int(next_token[0, 0]) == int(eos_id):
                 break
+            # Only the new token goes in next round; the cache holds the rest.
+            step_ids = next_token
 
     return generated
 
 
-def generate(model: Any, tokenizer: Any, messages: list[dict], max_new_tokens: int = 512) -> str:
+def generate(
+    model: Any,
+    tokenizer: Any,
+    messages: list[dict],
+    max_new_tokens: int = 512,
+    fast: bool = False,
+) -> str:
     """Generate a completion for `messages`.
 
     Tries the manual greedy_decode workaround first; on any exception, logs
-    a warning and falls back to model.generate(do_sample=False).
+    a warning and falls back to model.generate(do_sample=False). `fast` selects
+    cached decoding inside greedy_decode (see evaluation.fast_decode).
     """
     prompt = build_prompt(tokenizer, messages)
     device = _infer_device(model)
@@ -137,6 +209,7 @@ def generate(model: Any, tokenizer: Any, messages: list[dict], max_new_tokens: i
             inputs.get("attention_mask"),
             tokenizer,
             max_new_tokens=max_new_tokens,
+            fast=fast,
         )
         return tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
     except Exception as exc:

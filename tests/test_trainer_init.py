@@ -105,3 +105,63 @@ class TestBuildSftConfig:
         config = _config()
         sft_config = build_sft_config(config, tmp_path / "run_x", eval_available=True)
         assert sft_config.padding_free is False
+
+
+class TestTrainOnResponsesOnlyGuard:
+    """apply_train_on_responses_only must never silently mask every label."""
+
+    def test_marker_mismatch_leaves_trainer_untouched(self):
+        from src.trainer import apply_train_on_responses_only
+
+        config = _config()
+        config.training.train_on_responses_only = True
+        config.training.instruction_part = "<|NOT_IN_TEMPLATE|>"
+        config.training.response_part = "<|ALSO_MISSING|>"
+        sentinel = object()
+        formatted = [{"text": "<start_of_turn>user\nhi<start_of_turn>model\nthere"}]
+
+        result = apply_train_on_responses_only(sentinel, config, formatted)
+
+        # Markers absent -> refuse to patch, return the trainer unchanged.
+        assert result is sentinel
+
+    def test_empty_dataset_is_treated_as_mismatch(self):
+        from src.trainer import apply_train_on_responses_only
+
+        config = _config()
+        config.training.train_on_responses_only = True
+        sentinel = object()
+
+        assert apply_train_on_responses_only(sentinel, config, []) is sentinel
+
+    def test_default_markers_match_gemma4_unified_rendered_text(self, monkeypatch):
+        # Confirmed via a live Colab diagnostic against the real
+        # google/gemma-4-12B-it template: assistant turns render as
+        # "...<|turn>user\n<query><turn|>\n<|turn>model\n<response><turn|>\n"
+        # — this default (fixed after an earlier version used Gemma 2/3's
+        # "<start_of_turn>" markers, which never matched) must find both
+        # parts in a realistically-shaped sample and proceed to patch.
+        import sys
+        import types
+
+        from src import trainer as trainer_mod
+
+        config = _config()
+        config.training.train_on_responses_only = True
+        rendered = (
+            "<bos><|turn>system\nsys<turn|>\n<|turn>user\nctx<turn|>\n"
+            "<|turn>user\nquery<turn|>\n<|turn>model\nPASS_0\n...<turn|>\n"
+        )
+        formatted = [{"text": rendered}]
+        sentinel = object()
+        patched_marker = object()
+
+        fake_parent = types.ModuleType("unsloth")
+        fake_submodule = types.ModuleType("unsloth.chat_templates")
+        fake_submodule.train_on_responses_only = lambda t, **kw: patched_marker
+        fake_parent.chat_templates = fake_submodule
+        monkeypatch.setitem(sys.modules, "unsloth", fake_parent)
+        monkeypatch.setitem(sys.modules, "unsloth.chat_templates", fake_submodule)
+
+        result = trainer_mod.apply_train_on_responses_only(sentinel, config, formatted)
+        assert result is patched_marker

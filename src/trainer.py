@@ -29,6 +29,7 @@ handle it correctly alongside packing.
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from typing import Any, Optional
 
@@ -215,9 +216,12 @@ def train(
         n = min(8, len(train_ds))
         return [train_ds[i] for i in range(n)]
 
+    # Bind the cached-decoding choice here so decode_fn keeps its 4-arg shape.
+    decode_fn = functools.partial(inference.generate, fast=config.evaluation.fast_decode)
+
     callbacks = build_callbacks(
         config, wandb_logger, run_metadata,
-        sample_fn=_sample_fn, decode_fn=inference.generate, eval_available=eval_available,
+        sample_fn=_sample_fn, decode_fn=decode_fn, eval_available=eval_available,
     )
 
     sft_trainer = SFTTrainer(
@@ -229,11 +233,61 @@ def train(
         callbacks=callbacks,
     )
 
+    if config.training.train_on_responses_only:
+        sft_trainer = apply_train_on_responses_only(sft_trainer, config, formatted_train)
+
     resume_path = checkpoint.resolve_resume_path(adapter_dir, config.reproducibility.resume_training)
     logger.info("Starting training (resume_from_checkpoint=%s)...", resume_path)
     sft_trainer.train(resume_from_checkpoint=resume_path)
     logger.info("Training finished.")
     return sft_trainer
+
+
+def apply_train_on_responses_only(trainer: Any, config: ExperimentConfig, formatted_train: Any) -> Any:
+    """Mask prompt tokens out of the loss via Unsloth's train_on_responses_only.
+
+    This is the collator-level route, not TRL's assistant_only_loss (see the
+    module docstring for why that one was reverted). It operates on the already
+    flattened "text" dataset, so it does not interact with the messages
+    passthrough that crashed alongside packing.
+
+    The marker strings must appear verbatim in the rendered chat template. If
+    they do not, every label would be masked and the run would silently train
+    on nothing — so validate first and leave the trainer untouched on mismatch.
+    """
+    instruction_part = config.training.instruction_part
+    response_part = config.training.response_part
+
+    sample = formatted_train[0]["text"] if len(formatted_train) else ""
+    missing = [p for p in (instruction_part, response_part) if p not in sample]
+    if missing:
+        logger.warning(
+            "train_on_responses_only requested but marker(s) %r are absent from the "
+            "rendered chat template — refusing to apply it (every label would be "
+            "masked). Set training.instruction_part / training.response_part to match "
+            "this model's template. Rendered sample starts: %r",
+            missing, sample[:200],
+        )
+        return trainer
+
+    try:
+        from unsloth.chat_templates import train_on_responses_only
+    except Exception as exc:
+        logger.warning(
+            "Could not import unsloth.chat_templates.train_on_responses_only (%s) — "
+            "continuing with loss over the full sequence.", exc,
+        )
+        return trainer
+
+    patched = train_on_responses_only(
+        trainer, instruction_part=instruction_part, response_part=response_part
+    )
+    logger.info(
+        "train_on_responses_only enabled (instruction_part=%r, response_part=%r) — "
+        "loss is now computed on assistant tokens only.",
+        instruction_part, response_part,
+    )
+    return patched
 
 
 def save_best_model(trainer: Any, adapter_dir: Path, tokenizer: Any) -> None:

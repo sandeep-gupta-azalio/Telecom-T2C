@@ -82,6 +82,18 @@ class TrainingConfig:
     save_total_limit: int = 2
     reasoning: bool = True  # documented no-op on data content today — see README
     gradient_checkpointing: bool = True
+    # Mask the prompt out of the loss so gradient is spent only on the
+    # assistant turn. Uses Unsloth's collator-level train_on_responses_only,
+    # not TRL's assistant_only_loss (see trainer.py's module docstring for why
+    # that route was reverted). The marker strings must match the model's chat
+    # template exactly — these defaults are google/gemma-4-12B-it's actual
+    # gemma4_unified template markers ("<|turn>ROLE\n" / "<turn|>"), confirmed
+    # via a live Colab diagnostic — NOT Gemma 2/3's "<start_of_turn>"/
+    # "<end_of_turn>" convention (an earlier version of this field used those
+    # by mistake; see README Troubleshooting for the full incident).
+    train_on_responses_only: bool = False
+    instruction_part: str = "<|turn>user\n"
+    response_part: str = "<|turn>model\n"
 
 
 @dataclass
@@ -93,6 +105,10 @@ class EvaluationConfig:
     metric_for_best_model: str = "eval_loss"
     greater_is_better: bool = False
     max_new_tokens_eval: int = 512
+    # Incremental KV-cache decoding in inference.greedy_decode. Mathematically
+    # identical to the default full-resequence loop but ~100x faster; opt-in
+    # because disabling the cache was a deliberate Gemma+PEFT workaround.
+    fast_decode: bool = False
 
 
 @dataclass

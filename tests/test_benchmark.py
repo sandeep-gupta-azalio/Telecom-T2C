@@ -34,7 +34,11 @@ def _patch_model_loading(monkeypatch):
     monkeypatch.setattr(
         inference, "load_model_for_inference", lambda model_config, max_seq_length, adapter_dir, hf_token: (object(), object())
     )
-    monkeypatch.setattr(inference, "generate", lambda model, tokenizer, messages, max_new_tokens=512: _GOLD_TEXT)
+    monkeypatch.setattr(
+        inference,
+        "generate",
+        lambda model, tokenizer, messages, max_new_tokens=512, fast=False: _GOLD_TEXT,
+    )
 
 
 class TestRunBenchmarkDatasetSelection:

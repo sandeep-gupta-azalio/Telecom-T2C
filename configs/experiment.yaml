@@ -83,6 +83,19 @@ training:
   reasoning: true                            # documented no-op on data content today (dataset already
                                               # contains fixed PASS_0-4 turns); reserved for future use
   gradient_checkpointing: true
+  train_on_responses_only: true              # mask the prompt out of the loss; prompt and answer are
+                                             # near equal length here, so this roughly doubles the
+                                             # gradient signal spent on the 5-pass output itself
+  instruction_part: "<|turn>user\n"          # must match the model's chat template verbatim — confirmed
+                                              # via live diagnostic that google/gemma-4-12B-it's actual
+                                              # gemma4_unified template uses "<|turn>ROLE\n"/"<turn|>"
+                                              # markers, NOT Gemma 2/3's "<start_of_turn>"/"<end_of_turn>"
+                                              # (an earlier value here used the wrong, Gemma 2/3 markers —
+                                              # see README Troubleshooting for the full incident; the
+                                              # trainer's own safety check would have caught the mismatch
+                                              # and skipped masking rather than corrupting training, but
+                                              # this fixes it so the feature actually activates)
+  response_part: "<|turn>model\n"            # mismatch is detected and logged, not silently applied
 
 # -----------------------------------------------------------------------------
 # evaluation: loss-based + golden generation eval, early stopping.
@@ -95,6 +108,8 @@ evaluation:
   metric_for_best_model: eval_loss
   greater_is_better: false
   max_new_tokens_eval: 512
+  fast_decode: true                          # cached incremental decoding; same tokens, ~100x faster
+                                             # eval. Set false to restore the uncached notebook loop
 
 # -----------------------------------------------------------------------------
 # wandb: Weights & Biases logging. Gracefully disables itself if unavailable

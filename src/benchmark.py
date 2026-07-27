@@ -11,6 +11,7 @@ config/utils/evaluator/inference/manifest/wandb_logger.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -84,7 +85,9 @@ def run_benchmark(
             tokenizer,
             eval_dataset,
             max_new_tokens=config.evaluation.max_new_tokens_eval,
-            decode_fn=inference.generate,
+            decode_fn=functools.partial(
+                inference.generate, fast=config.evaluation.fast_decode
+            ),
         )
         scores = [p.exact_match for p in predictions if p.exact_match is not None]
         golden_metrics = {
