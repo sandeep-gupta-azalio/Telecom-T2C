@@ -18,7 +18,7 @@ Telecom-T2C/
   notebooks/
     Telecom_T2C_Trainer_v2.ipynb           # training orchestration only, no business logic
     Telecom_T2C_Benchmark.ipynb            # re-run PASS_0-4/exact-match eval against an existing adapter
-    Telecom_T2C_Inference_Server.ipynb     # Drive adapter -> ngrok tunnel, for local testing
+    Telecom_T2C_Inference_Server.ipynb     # Drive adapter -> ngrok tunnel or GGUF export, for local testing
   src/                                     # all real logic lives here
     config.py       # the only place YAML is parsed
     dataset.py       # DatasetLoader: load/validate train/val/golden splits
@@ -531,6 +531,52 @@ machine reaches it.
   serving-only, not needed for training.
 - The tunnel stays up only as long as the Colab runtime is connected;
   closing the tab or letting Colab idle-disconnect kills it.
+
+## Running the fine-tuned model in Ollama
+
+`notebooks/Telecom_T2C_Inference_Server.ipynb`'s Section 10 (Export to
+GGUF) is an alternative to the ngrok server above: it exports the loaded
+model + adapter as a single merged, quantized `.gguf` file via Unsloth's
+`model.save_pretrained_gguf(...)`, for running with
+[Ollama](https://ollama.com) or llama.cpp instead of Colab. **This is the
+one place in this project that merges the adapter into the base model** —
+disposable, for local serving only; the Drive-synced training artifact
+(`adapter/`) is never touched. Copies the export to
+`<google_drive_directory>/<run_name>/gguf/` since Colab's local disk is
+ephemeral.
+
+**Unverified**: `gemma4_unified` is a very new architecture — whether
+Unsloth's GGUF export / llama.cpp actually support it is confirmed only by
+that cell succeeding, not guaranteed by this project.
+
+Ollama has no knowledge of this project's custom chat template or the
+`<turn|>` stop-token fix already covered above
+(`inference.build_prompt`/`_resolve_stop_token_ids`) — a `Modelfile` needs
+both declared explicitly, or Ollama will reproduce the exact same
+never-stops-generating bug in its own serving stack:
+
+```
+FROM ./gemma4_t2c_gguf/your-model-file.gguf
+TEMPLATE """{{ if .System }}<|turn>system
+{{ .System }}<turn|>
+{{ end }}<|turn>user
+{{ .Prompt }}<turn|>
+<|turn>model
+{{ .Response }}<turn|>
+"""
+PARAMETER stop "<turn|>"
+PARAMETER temperature 0
+```
+
+Test it standalone before wiring it into anything else: `ollama create
+t2c-gemma4 -f Modelfile`, then `ollama run t2c-gemma4` with a raw prompt,
+and confirm it produces clean `PASS_0...PASS_4` output that actually stops.
+The sibling `t2c` project's `--llm-provider ollama --llm-model t2c-gemma4`
+(optionally `--llm-api-base` if Ollama isn't on the default
+`http://localhost:11434`) then points its `--l1-mode llm`/`--run-llm-l1`
+path at it — see that project's own docs for the prompt-alignment work
+that makes this a valid comparison against the training data in the first
+place (`t2c.tir.l1.build_llm_l1_prompt`/`extract_pass4_envelope`).
 
 ---
 
