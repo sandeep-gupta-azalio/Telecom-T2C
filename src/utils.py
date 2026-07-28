@@ -273,12 +273,18 @@ def mount_google_drive(mount_point: str = "/content/drive") -> Optional[Path]:
 
 
 def resolve_secret(env_var_name: str) -> Optional[str]:
-    """Resolve an arbitrary secret from the environment, then Colab secrets.
+    """Resolve an arbitrary secret from the environment, then Colab secrets,
+    then Kaggle secrets.
 
-    Same env-var-then-Colab-secret lookup tokenizer.resolve_hf_token uses,
-    generalized for secrets that aren't an HF token (e.g. an ngrok
+    Same env-var-then-platform-secret lookup tokenizer.resolve_hf_token
+    uses, generalized for secrets that aren't an HF token (e.g. an ngrok
     authtoken) — kept here rather than in tokenizer.py since it has nothing
-    to do with tokenization. Returns None (not an error) if not found.
+    to do with tokenization. Each platform lookup is independently
+    try/except-guarded (not just "is this platform present at all"), since
+    google.colab/kaggle_secrets being importable doesn't guarantee the
+    named secret exists there — a missing secret should fall through to
+    the next source, not raise. Returns None (not an error) if not found
+    anywhere.
     """
     import os
 
@@ -289,6 +295,14 @@ def resolve_secret(env_var_name: str) -> Optional[str]:
         from google.colab import userdata  # type: ignore[import-not-found]
 
         value = userdata.get(env_var_name)
+        if value:
+            return value
+    except Exception:
+        pass
+    try:
+        from kaggle_secrets import UserSecretsClient  # type: ignore[import-not-found]
+
+        value = UserSecretsClient().get_secret(env_var_name)
         if value:
             return value
     except Exception:

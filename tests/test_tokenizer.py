@@ -13,7 +13,11 @@ import pytest
 
 transformers = pytest.importorskip("transformers", reason="transformers not installed in this environment")
 
-from src.tokenizer import patch_chat_template_for_assistant_masking, patch_extra_special_tokens_list_format
+from src.tokenizer import (
+    patch_chat_template_for_assistant_masking,
+    patch_extra_special_tokens_list_format,
+    resolve_hf_token,
+)
 
 
 def _get_base_class():
@@ -169,3 +173,26 @@ class TestPatchChatTemplateForAssistantMasking:
         tok.tokenizer = tok
         patch_chat_template_for_assistant_masking(tok)
         assert tok.chat_template.count("{% generation %}") == 1
+
+
+class TestResolveHfToken:
+    """resolve_hf_token() delegates to utils.resolve_secret() — this used to
+    have its own narrower, Colab-only lookup, which silently missed an HF
+    token stored as a Kaggle Secret on a Kaggle-hosted notebook.
+    """
+
+    def test_returns_env_var_value(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "env-token")
+        assert resolve_hf_token("HF_TOKEN") == "env-token"
+
+    def test_returns_none_when_not_found_anywhere(self, monkeypatch):
+        import sys
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delitem(sys.modules, "google.colab", raising=False)
+        monkeypatch.delitem(sys.modules, "kaggle_secrets", raising=False)
+        assert resolve_hf_token("HF_TOKEN") is None
+
+    def test_uses_custom_env_var_name(self, monkeypatch):
+        monkeypatch.setenv("MY_CUSTOM_HF_TOKEN", "custom-token")
+        assert resolve_hf_token("MY_CUSTOM_HF_TOKEN") == "custom-token"

@@ -8,7 +8,6 @@ multimodal HF repos only ship a processor rather than a standalone tokenizer.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Optional
 
 from src import utils
@@ -159,24 +158,20 @@ def patch_chat_template_for_assistant_masking(tokenizer: Any) -> None:
 
 
 def resolve_hf_token(env_var_name: str = "HF_TOKEN") -> Optional[str]:
-    """Resolve a Hugging Face token from the environment, then Colab secrets.
+    """Resolve a Hugging Face token from the environment, Colab secrets, or Kaggle secrets.
 
-    Mirrors notebook section 4. Returns None (not an error) if no token is
-    found — public models download anonymously, and a private/gated model
-    will simply fail later with a clear HF-side error if a token was needed.
+    Delegates to utils.resolve_secret() (env var -> Colab -> Kaggle) rather
+    than duplicating its own narrower lookup — this used to only check
+    Colab, silently missing an HF token stored as a Kaggle Secret on a
+    Kaggle-hosted notebook. Returns None (not an error) if no token is
+    found anywhere — public models download anonymously, and a
+    private/gated model will simply fail later with a clear HF-side error
+    if a token was actually needed.
     """
-    token = os.environ.get(env_var_name)
+    token = utils.resolve_secret(env_var_name)
     if token:
         return token
-    try:
-        from google.colab import userdata  # type: ignore[import-not-found]
-
-        token = userdata.get(env_var_name)
-        if token:
-            return token
-    except Exception:
-        pass
-    logger.info("No %s found in environment or Colab secrets — downloading anonymously.", env_var_name)
+    logger.info("No %s found in environment or platform secrets — downloading anonymously.", env_var_name)
     return None
 
 

@@ -19,6 +19,7 @@ Telecom-T2C/
     Telecom_T2C_Trainer_v2.ipynb           # training orchestration only, no business logic
     Telecom_T2C_Benchmark.ipynb            # re-run PASS_0-4/exact-match eval against an existing adapter
     Telecom_T2C_Inference_Server.ipynb     # Drive adapter -> ngrok tunnel or GGUF export, for local testing
+    Telecom_T2C_Inference_Server_Kaggle.ipynb  # same idea, hosted on Kaggle (Kaggle Dataset instead of Drive)
   src/                                     # all real logic lives here
     config.py       # the only place YAML is parsed
     dataset.py       # DatasetLoader: load/validate train/val/golden splits
@@ -531,6 +532,20 @@ machine reaches it.
   serving-only, not needed for training.
 - The tunnel stays up only as long as the Colab runtime is connected;
   closing the tab or letting Colab idle-disconnect kills it.
+
+### Same thing, hosted on Kaggle
+
+`notebooks/Telecom_T2C_Inference_Server_Kaggle.ipynb` is the same ngrok-tunneled
+LoRA-adapter server, adapted for Kaggle instead of Colab — useful when Colab
+quota/availability is the blocker, or you'd simply rather run this on
+Kaggle. Kaggle has no Google Drive mount, so the adapter has to arrive as a
+**Kaggle Dataset** you attach to the notebook (upload the adapter folder or
+the zip the trainer notebook's Section 11 already produces, then attach it
+via the notebook sidebar's **+ Add Input**) — the notebook's own Section 4
+has the exact steps. `utils.resolve_secret()` already checks Kaggle Secrets
+alongside Colab's and a plain environment variable, so the ngrok-authtoken
+and HF-token cells need no Kaggle-specific changes. Turn on **Internet** and
+select a **GPU** in the notebook's settings before running.
 
 ## Running the fine-tuned model in Ollama
 
