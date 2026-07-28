@@ -47,21 +47,59 @@ class GenerateResponse(BaseModel):
     elapsed_seconds: float
 
 
+class ChatCompletionRequest(BaseModel):
+    model: Optional[str] = None
+    messages: list[Message]
+    max_tokens: Optional[int] = None
+    # Accepted for OpenAI-client compatibility but otherwise ignored —
+    # inference.generate always greedy-decodes (see its own docstring for
+    # why: a documented Gemma+PEFT model.generate() workaround), so there
+    # is no sampling temperature to honor here.
+    temperature: Optional[float] = None
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: Message
+    finish_reason: str = "stop"
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    model: str
+    choices: list[ChatCompletionChoice]
+
+
 def generate_api_token() -> str:
     """Return a fresh random bearer token (printed once in the notebook, not stored)."""
     return secrets.token_urlsafe(24)
 
 
 def build_app(model: Any, tokenizer: Any, api_token: str, default_max_new_tokens: int = 512) -> Any:
-    """Build a FastAPI app exposing GET /health and POST /generate.
+    """Build a FastAPI app exposing GET /health, POST /generate, and POST /chat/completions.
 
-    /generate requires `Authorization: Bearer <api_token>`. Request body is
+    Both generation routes require `Authorization: Bearer <api_token>`.
+
+    /generate takes this project's own shape:
     `{"messages": [{"role": ..., "content": ...}, ...], "max_new_tokens": int?}`
     — the same prompt-turns list shape used throughout src/ (see
-    inference.build_prompt). Generation runs synchronously via
-    inference.generate on whatever thread FastAPI dispatches the request to;
-    this server is for one developer's manual testing, not concurrent
-    production load, so no request queue/batching is implemented.
+    inference.build_prompt).
+
+    /chat/completions speaks OpenAI's chat-completions request/response
+    shape instead, so an unmodified OpenAI-compatible client — notably the
+    sibling t2c project's `execute_openai()` (LlmConfig(provider="openai",
+    api_base=<this server's ngrok URL>)) — can talk to this server without
+    any t2c-side changes. `OPENAI_API_KEY` on the client side must be set
+    to this server's own bearer token (printed once when the notebook
+    starts this server) — execute_openai() sends it as
+    `Authorization: Bearer <OPENAI_API_KEY>`, which is exactly the header
+    _check_auth() below expects; there's no real OpenAI account involved.
+
+    Generation runs synchronously via inference.generate on whatever thread
+    FastAPI dispatches the request to; this server is for one developer's
+    manual testing, not concurrent production load, so no request
+    queue/batching is implemented.
     """
     from src import inference
 
@@ -70,6 +108,16 @@ def build_app(model: Any, tokenizer: Any, api_token: str, default_max_new_tokens
     def _check_auth(authorization: Optional[str]) -> None:
         if authorization != f"Bearer {api_token}":
             raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+    def _run_generate(messages: list[Message], max_new_tokens: int) -> tuple[str, float]:
+        if not messages:
+            raise HTTPException(status_code=400, detail="messages must be a non-empty list")
+        message_dicts = [m.model_dump() for m in messages]
+        start = time.monotonic()
+        text = inference.generate(model, tokenizer, message_dicts, max_new_tokens=max_new_tokens)
+        elapsed = time.monotonic() - start
+        logger.info("Generated %d chars in %.1fs", len(text), elapsed)
+        return text, elapsed
 
     @app.get("/health")
     def health() -> dict:
@@ -80,17 +128,22 @@ def build_app(model: Any, tokenizer: Any, api_token: str, default_max_new_tokens
         request: GenerateRequest, authorization: Optional[str] = Header(None)
     ) -> GenerateResponse:
         _check_auth(authorization)
-        if not request.messages:
-            raise HTTPException(status_code=400, detail="messages must be a non-empty list")
-
-        messages = [m.model_dump() for m in request.messages]
-        max_new_tokens = request.max_new_tokens or default_max_new_tokens
-
-        start = time.monotonic()
-        text = inference.generate(model, tokenizer, messages, max_new_tokens=max_new_tokens)
-        elapsed = time.monotonic() - start
-        logger.info("Generated %d chars in %.1fs", len(text), elapsed)
+        text, elapsed = _run_generate(request.messages, request.max_new_tokens or default_max_new_tokens)
         return GenerateResponse(generated_text=text, elapsed_seconds=elapsed)
+
+    @app.post("/chat/completions", response_model=ChatCompletionResponse)
+    def chat_completions_endpoint(
+        request: ChatCompletionRequest, authorization: Optional[str] = Header(None)
+    ) -> ChatCompletionResponse:
+        _check_auth(authorization)
+        text, _elapsed = _run_generate(request.messages, request.max_tokens or default_max_new_tokens)
+        return ChatCompletionResponse(
+            id=f"t2c-{secrets.token_hex(8)}",
+            model=request.model or "t2c-gemma4",
+            choices=[
+                ChatCompletionChoice(index=0, message=Message(role="assistant", content=text))
+            ],
+        )
 
     return app
 

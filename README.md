@@ -547,6 +547,33 @@ alongside Colab's and a plain environment variable, so the ngrok-authtoken
 and HF-token cells need no Kaggle-specific changes. Turn on **Internet** and
 select a **GPU** in the notebook's settings before running.
 
+### Pointing `t2c` at this server directly (LoRA adapter, no GGUF/Ollama)
+
+`src/server.py` exposes **two** generation routes side by side:
+`POST /generate` (this project's own request shape) and
+`POST /chat/completions` (OpenAI's shape), both behind the same bearer-token
+auth. The second one exists specifically so the sibling `t2c` project's
+`--llm-provider openai` can talk to this server **unmodified** — no Ollama,
+no GGUF, no merged model, just the LoRA adapter served straight from the
+notebook:
+
+```bash
+export OPENAI_API_KEY="<bearer token printed by the notebook's Start Server cell>"
+python -m t2c.cli benchmark gpon-xlsx --run-llm-l1 \
+  --llm-provider openai --llm-model t2c-gemma4 \
+  --llm-api-base https://<your-ngrok-subdomain>.ngrok-free.dev
+```
+
+`OPENAI_API_KEY` is not a real OpenAI key here — `execute_openai()` sends
+whatever's in that env var as `Authorization: Bearer <value>`, which is
+exactly the header this server's `_check_auth()` expects, so setting it to
+the printed bearer token authenticates directly against your own server.
+`--llm-model` can be any string; this server always answers with whatever
+model is actually loaded regardless of what's requested. Don't set
+`--llm-provider ollama` against this URL — Ollama's provider sends a
+completely different request shape (`/api/generate` with
+`{"model", "prompt", "system"}`), which this server doesn't understand.
+
 ## Running the fine-tuned model in Ollama
 
 `notebooks/Telecom_T2C_Inference_Server.ipynb`'s Section 6 (Export to
