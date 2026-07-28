@@ -414,3 +414,131 @@ def export_predictions(predictions: list[PredictionRecord], out_path: Path) -> P
     utils.write_jsonl(out_path, rows)
     logger.info("Exported %d predictions to %s", len(predictions), out_path)
     return out_path
+
+
+@dataclass
+class LookupLevelQuery:
+    """One phrasing of a lookup, at one of 4 increasing-implicitness levels.
+
+    group_id ties together every phrasing of the SAME underlying
+    entity+identifier lookup (e.g. "Show ONU <sn>" / "Find subscriber <sn>"
+    / "Show <sn>" / "Need details for subscriber <sn>" all share a
+    group_id) — see run_lookup_level_benchmark's docstring for why the
+    group is the unit of comparison, not an externally-supplied gold answer.
+    """
+
+    group_id: str
+    level: int
+    level_name: str
+    query: str
+
+
+@dataclass
+class LookupLevelResult:
+    group_id: str
+    level: int
+    level_name: str
+    query: str
+    generated: str
+    pass4_envelope: Optional[dict[str, Any]]
+    matches_level1: Optional[bool]
+
+
+def run_lookup_level_benchmark(
+    model: Any,
+    tokenizer: Any,
+    queries: list[LookupLevelQuery],
+    system_prompt: str,
+    deployment_context: str,
+    decode_fn: Callable[[Any, Any, list[dict], int], str],
+    max_new_tokens: int = 400,
+) -> list[LookupLevelResult]:
+    """Measure whether the model's PASS_4 answer holds up as the SAME lookup
+    is phrased with progressively less explicit, more natural language
+    (Level 1: explicit entity + explicit identifier, ... Level 4: natural
+    operator language, entity and identifier both implicit).
+
+    Deliberately does NOT compare against a hand-authored "gold" PASS_4 for
+    every query: this project's fine-tuning only covers phase-1 (simple
+    lookups), and hand-guessing the correct qualifier-attribute name/entity
+    resolution for phrasing this project's own dataset pipeline didn't
+    generate risks silently encoding a WRONG answer as ground truth —
+    exactly what this project's evidence-first approach exists to avoid
+    (see README). Instead, within each group_id, Level 1's answer — the
+    easiest, most template-like phrasing, closest to the training
+    distribution — becomes that group's OWN reference; every other level
+    in the group is compared against it, not against an external gold.
+    This measures the thing that actually matters for a phase-1 model:
+    does correctness degrade as phrasing gets less explicit, without
+    requiring an independently-verified ground truth this project doesn't
+    have for arbitrary hand-written queries.
+
+    A group missing a valid Level 1 (absent, or its PASS_4 didn't parse)
+    leaves every other level in that group with matches_level1=None —
+    "not scored," never silently counted as a match or a miss.
+    """
+    groups: dict[str, list[LookupLevelQuery]] = {}
+    for q in queries:
+        groups.setdefault(q.group_id, []).append(q)
+
+    results: list[LookupLevelResult] = []
+    for group_id, group_queries in groups.items():
+        ordered = sorted(group_queries, key=lambda q: q.level)
+        level1_envelope: Optional[dict[str, Any]] = None
+        seen_level1 = False
+        for q in ordered:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": deployment_context},
+                {"role": "user", "content": f"## Query\n{q.query}"},
+            ]
+            generated = decode_fn(model, tokenizer, messages, max_new_tokens)
+            envelope = parse_pass4_envelope(generated)
+
+            if q.level == 1:
+                level1_envelope = envelope
+                seen_level1 = True
+                matches_level1 = None
+            elif not seen_level1 or level1_envelope is None:
+                matches_level1 = None
+            else:
+                matches_level1 = envelope == level1_envelope
+
+            results.append(
+                LookupLevelResult(
+                    group_id=group_id,
+                    level=q.level,
+                    level_name=q.level_name,
+                    query=q.query,
+                    generated=generated,
+                    pass4_envelope=envelope,
+                    matches_level1=matches_level1,
+                )
+            )
+    return results
+
+
+def summarize_lookup_level_results(results: list[LookupLevelResult]) -> dict[int, dict[str, Any]]:
+    """Per-level consistency-with-Level-1 rate, aggregated across all groups."""
+    by_level: dict[int, list[LookupLevelResult]] = {}
+    for r in results:
+        by_level.setdefault(r.level, []).append(r)
+
+    summary: dict[int, dict[str, Any]] = {}
+    for level, level_results in sorted(by_level.items()):
+        if level == 1:
+            summary[level] = {
+                "level_name": level_results[0].level_name,
+                "num_queries": len(level_results),
+                "note": "reference level — each group's own baseline, not scored against itself",
+            }
+            continue
+        scoreable = [r for r in level_results if r.matches_level1 is not None]
+        matches = sum(1 for r in scoreable if r.matches_level1)
+        summary[level] = {
+            "level_name": level_results[0].level_name,
+            "num_queries": len(level_results),
+            "num_scoreable": len(scoreable),
+            "consistency_with_level1": (matches / len(scoreable)) if scoreable else 0.0,
+        }
+    return summary

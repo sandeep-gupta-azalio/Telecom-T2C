@@ -461,6 +461,29 @@ Dataset, Run Benchmark. Writes `benchmark_report.json` and
 `<source>_predictions.jsonl` back into the *same* Drive run directory the
 adapter came from, alongside `adapter/`.
 
+### Lookup-level robustness check
+
+Training so far only covers phase-1 simple-lookup queries — the aggregate
+`pass_metrics` above can't show whether the model stays correct as the
+*same* lookup gets phrased with progressively less explicit, more natural
+language. Section 7 of `Telecom_T2C_Benchmark.ipynb`
+(`evaluator.run_lookup_level_benchmark()`) tests exactly that, across 4
+levels: explicit entity + explicit identifier, synonyms, implicit entity
+inferred from the identifier's shape, and natural operator language.
+
+**Deliberately does not score against a hand-authored "gold" answer** —
+there's no independently-verified ground truth for arbitrary hand-written
+queries, and guessing the correct entity/qualifier resolution risks
+silently encoding a wrong answer as truth. Instead, within each group (the
+same underlying entity+identifier phrased at all 4 levels), **Level 1's
+own answer becomes that group's reference**; every other level is checked
+against it via `parse_pass4_envelope()`, not an external gold. A group
+whose Level 1 doesn't parse leaves the rest of that group unscored (not
+silently marked right or wrong). `evaluator.summarize_lookup_level_results()`
+reports, per level, how often it matched its own group's Level 1 —
+directly answering whether correctness degrades as phrasing gets less
+explicit.
+
 ## Speeding up generation-based evaluation
 
 Generation-eval (val/golden `exact_match_rate` + `pass_metrics`) was slow

@@ -9,6 +9,7 @@ on t2c itself, so the shape is reproduced literally rather than generated.
 import pytest
 
 from src.evaluator import (
+    LookupLevelQuery,
     PassAccuracy,
     PredictionRecord,
     evaluate_passes,
@@ -18,6 +19,8 @@ from src.evaluator import (
     parse_pass2_intent,
     parse_pass3_semantic,
     parse_pass4_envelope,
+    run_lookup_level_benchmark,
+    summarize_lookup_level_results,
 )
 
 
@@ -240,3 +243,133 @@ class TestGeneratePredictions:
         dataset = [_dataset_row("q1"), {"messages": [{"role": "user", "content": "no reply"}]}]
         records = generate_predictions(object(), object(), dataset, 100, decode_fn)
         assert len(records) == 1
+
+
+def _envelope_text(entity: str, value: str) -> str:
+    envelope = (
+        '{"status": "SUCCESS", "operation": {"type": "LOOKUP"}, '
+        f'"subject": {{"entity": "{entity}"}}, '
+        f'"qualifiers": [{{"attribute": "ID", "operator": "=", "value": "{value}"}}]}}'
+    )
+    return _assistant_text(envelope=envelope)
+
+
+class TestRunLookupLevelBenchmark:
+    def _make_decode_fn(self, responses: dict):
+        def decode_fn(model, tokenizer, messages, max_new_tokens):
+            query = messages[-1]["content"]
+            return responses[query]
+
+        return decode_fn
+
+    def test_level_1_is_never_scored(self):
+        queries = [LookupLevelQuery(group_id="g1", level=1, level_name="Explicit", query="q1")]
+        decode_fn = self._make_decode_fn({"## Query\nq1": _envelope_text("ONU", "SN1")})
+
+        results = run_lookup_level_benchmark(
+            object(), object(), queries, "sys", "ctx", decode_fn, max_new_tokens=10
+        )
+        assert results[0].matches_level1 is None
+
+    def test_matching_and_diverging_levels_within_a_group(self):
+        queries = [
+            LookupLevelQuery(group_id="g1", level=1, level_name="Explicit", query="show ONU SN1"),
+            LookupLevelQuery(group_id="g1", level=3, level_name="Implicit", query="show SN1"),
+            LookupLevelQuery(group_id="g1", level=4, level_name="Natural", query="details for SN1"),
+        ]
+        decode_fn = self._make_decode_fn({
+            "## Query\nshow ONU SN1": _envelope_text("ONU", "SN1"),
+            "## Query\nshow SN1": _envelope_text("ONU", "SN1"),  # matches level 1
+            "## Query\ndetails for SN1": _envelope_text("OLT", "SN1"),  # diverges
+        })
+
+        results = run_lookup_level_benchmark(
+            object(), object(), queries, "sys", "ctx", decode_fn, max_new_tokens=10
+        )
+        by_level = {r.level: r for r in results}
+        assert by_level[1].matches_level1 is None
+        assert by_level[3].matches_level1 is True
+        assert by_level[4].matches_level1 is False
+
+    def test_groups_are_scored_independently(self):
+        queries = [
+            LookupLevelQuery(group_id="onu", level=1, level_name="Explicit", query="onu q1"),
+            LookupLevelQuery(group_id="onu", level=3, level_name="Implicit", query="onu q3"),
+            LookupLevelQuery(group_id="ip", level=1, level_name="Explicit", query="ip q1"),
+            LookupLevelQuery(group_id="ip", level=3, level_name="Implicit", query="ip q3"),
+        ]
+        decode_fn = self._make_decode_fn({
+            "## Query\nonu q1": _envelope_text("ONU", "A"),
+            "## Query\nonu q3": _envelope_text("ONU", "A"),  # matches its own group's level 1
+            "## Query\nip q1": _envelope_text("NE", "B"),
+            "## Query\nip q3": _envelope_text("ONU", "WRONG"),  # diverges from its own group's level 1
+        })
+
+        results = run_lookup_level_benchmark(
+            object(), object(), queries, "sys", "ctx", decode_fn, max_new_tokens=10
+        )
+        by_group_level = {(r.group_id, r.level): r for r in results}
+        assert by_group_level[("onu", 3)].matches_level1 is True
+        assert by_group_level[("ip", 3)].matches_level1 is False
+
+    def test_unparseable_level1_leaves_group_unscored(self):
+        queries = [
+            LookupLevelQuery(group_id="g1", level=1, level_name="Explicit", query="q1"),
+            LookupLevelQuery(group_id="g1", level=3, level_name="Implicit", query="q3"),
+        ]
+        decode_fn = self._make_decode_fn({
+            "## Query\nq1": "garbage, no PASS markers at all",
+            "## Query\nq3": _envelope_text("ONU", "SN1"),
+        })
+
+        results = run_lookup_level_benchmark(
+            object(), object(), queries, "sys", "ctx", decode_fn, max_new_tokens=10
+        )
+        by_level = {r.level: r for r in results}
+        assert by_level[1].pass4_envelope is None
+        assert by_level[3].matches_level1 is None
+
+
+class TestSummarizeLookupLevelResults:
+    def test_level1_marked_as_reference_not_scored(self):
+        from src.evaluator import LookupLevelResult
+
+        results = [
+            LookupLevelResult(
+                group_id="g1", level=1, level_name="Explicit", query="q1",
+                generated="x", pass4_envelope={}, matches_level1=None,
+            )
+        ]
+        summary = summarize_lookup_level_results(results)
+        assert "consistency_with_level1" not in summary[1]
+        assert summary[1]["num_queries"] == 1
+
+    def test_consistency_rate_averages_across_groups(self):
+        from src.evaluator import LookupLevelResult
+
+        results = [
+            LookupLevelResult(
+                group_id="g1", level=3, level_name="Implicit", query="q1",
+                generated="x", pass4_envelope={}, matches_level1=True,
+            ),
+            LookupLevelResult(
+                group_id="g2", level=3, level_name="Implicit", query="q2",
+                generated="x", pass4_envelope={}, matches_level1=False,
+            ),
+        ]
+        summary = summarize_lookup_level_results(results)
+        assert summary[3]["consistency_with_level1"] == 0.5
+        assert summary[3]["num_scoreable"] == 2
+
+    def test_unscoreable_results_excluded_from_denominator(self):
+        from src.evaluator import LookupLevelResult
+
+        results = [
+            LookupLevelResult(
+                group_id="g1", level=3, level_name="Implicit", query="q1",
+                generated="x", pass4_envelope=None, matches_level1=None,
+            ),
+        ]
+        summary = summarize_lookup_level_results(results)
+        assert summary[3]["num_scoreable"] == 0
+        assert summary[3]["consistency_with_level1"] == 0.0
