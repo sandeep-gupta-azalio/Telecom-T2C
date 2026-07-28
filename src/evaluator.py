@@ -452,6 +452,7 @@ def run_lookup_level_benchmark(
     deployment_context: str,
     decode_fn: Callable[[Any, Any, list[dict], int], str],
     max_new_tokens: int = 400,
+    on_result: Optional[Callable[[LookupLevelResult], None]] = None,
 ) -> list[LookupLevelResult]:
     """Measure whether the model's PASS_4 answer holds up as the SAME lookup
     is phrased with progressively less explicit, more natural language
@@ -476,6 +477,12 @@ def run_lookup_level_benchmark(
     A group missing a valid Level 1 (absent, or its PASS_4 didn't parse)
     leaves every other level in that group with matches_level1=None —
     "not scored," never silently counted as a match or a miss.
+
+    on_result, if given, is called with each LookupLevelResult immediately
+    after it's produced (not batched at the end) — for a long-running
+    remote benchmark (scripts/run_remote_lookup_benchmark.py), this lets a
+    caller persist results to a log file as they arrive rather than losing
+    everything generated so far if a later query in the run fails/hangs.
     """
     groups: dict[str, list[LookupLevelQuery]] = {}
     for q in queries:
@@ -504,17 +511,18 @@ def run_lookup_level_benchmark(
             else:
                 matches_level1 = envelope == level1_envelope
 
-            results.append(
-                LookupLevelResult(
-                    group_id=group_id,
-                    level=q.level,
-                    level_name=q.level_name,
-                    query=q.query,
-                    generated=generated,
-                    pass4_envelope=envelope,
-                    matches_level1=matches_level1,
-                )
+            result = LookupLevelResult(
+                group_id=group_id,
+                level=q.level,
+                level_name=q.level_name,
+                query=q.query,
+                generated=generated,
+                pass4_envelope=envelope,
+                matches_level1=matches_level1,
             )
+            results.append(result)
+            if on_result is not None:
+                on_result(result)
     return results
 
 

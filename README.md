@@ -597,6 +597,45 @@ model is actually loaded regardless of what's requested. Don't set
 completely different request shape (`/api/generate` with
 `{"model", "prompt", "system"}`), which this server doesn't understand.
 
+### Running the lookup-level benchmark locally
+
+`scripts/run_remote_lookup_benchmark.py` runs the exact same query set as
+Section 7 of `Telecom_T2C_Benchmark.ipynb` (both import from
+`src/lookup_level_queries.py`, so they can't drift apart), but from your own
+PC against the hosted ngrok server instead of inside the notebook — no
+GPU/model/Unsloth needed locally, only the standard library:
+
+```bash
+export OPENAI_API_KEY="<bearer token printed by the notebook's Start Server cell>"
+python scripts/run_remote_lookup_benchmark.py \
+  --base-url https://<your-ngrok-subdomain>.ngrok-free.dev
+```
+
+(`--api-token` also works directly if you'd rather not reuse
+`OPENAI_API_KEY`; `T2C_API_TOKEN` is checked as a second fallback env var.)
+
+This needs `stream=True` support on `/chat/completions`
+(`inference.generate_stream` + `src/server.py`'s SSE response), which the
+in-notebook run doesn't use — streaming lets the client measure **real**
+per-query performance, not just pass/fail correctness:
+
+- **TTFT** (time to first token) — wall-clock time from request sent to the
+  first non-empty SSE content chunk. Dominated by prompt processing, not
+  decode speed.
+- **Tokens/sec** — steady-state decode throughput,
+  `(tokens_generated - 1) / (total_seconds - ttft_seconds)`, i.e. excluding
+  the TTFT interval, since that's prompt-processing time, not decoding.
+- **Checks covered** — the same `evaluator.summarize_lookup_level_results()`
+  consistency-with-Level-1 breakdown described above, printed per level
+  alongside the performance numbers.
+
+Every per-query result (generated text, parsed PASS_4 envelope,
+`matches_level1`, and its TTFT/total/tokens-per-sec) is appended to a JSONL
+log file **as it arrives** (default `logs/lookup_level_benchmark_<timestamp>.jsonl`,
+override with `--log-file`) — a run interrupted partway through (Ctrl-C, a
+dropped tunnel, a timeout) still leaves a usable partial record on disk
+rather than losing everything held only in memory.
+
 ## Running the fine-tuned model in Ollama
 
 `notebooks/Telecom_T2C_Inference_Server.ipynb`'s Section 6 (Export to

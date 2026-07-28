@@ -329,6 +329,24 @@ class TestRunLookupLevelBenchmark:
         assert by_level[1].pass4_envelope is None
         assert by_level[3].matches_level1 is None
 
+    def test_on_result_called_once_per_query_in_order_as_produced(self):
+        queries = [
+            LookupLevelQuery(group_id="g1", level=1, level_name="Explicit", query="q1"),
+            LookupLevelQuery(group_id="g1", level=3, level_name="Implicit", query="q3"),
+        ]
+        decode_fn = self._make_decode_fn({
+            "## Query\nq1": _envelope_text("ONU", "SN1"),
+            "## Query\nq3": _envelope_text("ONU", "SN1"),
+        })
+        seen: list = []
+
+        results = run_lookup_level_benchmark(
+            object(), object(), queries, "sys", "ctx", decode_fn, max_new_tokens=10,
+            on_result=seen.append,
+        )
+        assert seen == results
+        assert [r.level for r in seen] == [1, 3]
+
 
 class TestSummarizeLookupLevelResults:
     def test_level1_marked_as_reference_not_scored(self):

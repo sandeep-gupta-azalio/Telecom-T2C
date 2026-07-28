@@ -10,7 +10,7 @@ is never silent.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from src import utils
 from src.config import ModelConfig
@@ -317,6 +317,79 @@ def generate(
                 eos_token_id=list(stop_token_ids) if stop_token_ids else tokenizer.eos_token_id,
             )
         return tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
+
+
+def generate_stream(
+    model: Any,
+    tokenizer: Any,
+    messages: list[dict],
+    max_new_tokens: int = 512,
+) -> Iterator[tuple[str, int]]:
+    """Token-by-token generator counterpart to generate(), for streaming responses
+    (see server.py's /chat/completions stream=True path).
+
+    Yields (delta_text, token_index) pairs — token_index is the 1-based count
+    of model-generated steps so far, including steps whose delta is "" (e.g.
+    the final stop-token step, almost always empty since it decodes to a
+    special token that skip_special_tokens strips). Callers that want an
+    accurate generated-token count for a tokens/sec figure should use the
+    LAST token_index they see, not the number of non-empty deltas received.
+
+    Always uses the cached (fast=True-equivalent) greedy path — the O(n^2)
+    uncached path generate() also supports isn't useful for a streaming
+    caller, which wants incremental tokens as soon as possible, not a single
+    final string. Re-decodes the full generated-so-far suffix every step
+    (cheap relative to the model forward pass it's paired with) and yields
+    only the new suffix, rather than decoding each new token id in
+    isolation — a token decoded alone can round-trip differently than the
+    same token decoded as part of its full context (subword/whitespace
+    merging), so per-token-id decoding risks emitting subtly wrong text.
+
+    Unlike generate(), does NOT fall back to model.generate() on failure:
+    that path returns one complete string, which can't satisfy a streaming
+    contract. A failure here propagates to the caller.
+    """
+    import torch
+
+    prompt = build_prompt(tokenizer, messages)
+    device = _infer_device(model)
+    stop_token_ids = _resolve_stop_token_ids(tokenizer)
+    inputs = tokenizer(text=prompt, return_tensors="pt").to(device)
+
+    model.eval()
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+
+    stop_ids = set(stop_token_ids)
+    if tokenizer.eos_token_id is not None:
+        stop_ids.add(int(tokenizer.eos_token_id))
+
+    prompt_len = inputs["input_ids"].shape[-1]
+    generated = inputs["input_ids"]
+    attn = inputs.get("attention_mask")
+    past = None
+    step_ids = generated
+    prev_text = ""
+    token_index = 0
+
+    with torch.inference_mode():
+        for _ in range(max_new_tokens):
+            outputs = model(input_ids=step_ids, attention_mask=attn, use_cache=True, past_key_values=past)
+            past = outputs.past_key_values
+            next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            generated = torch.cat([generated, next_token], dim=-1)
+            if attn is not None:
+                attn = torch.cat([attn, torch.ones_like(next_token, dtype=attn.dtype)], dim=-1)
+            token_index += 1
+
+            full_text = tokenizer.decode(generated[0][prompt_len:], skip_special_tokens=True)
+            delta = full_text[len(prev_text) :]
+            prev_text = full_text
+            yield delta, token_index
+
+            if int(next_token[0, 0]) in stop_ids:
+                break
+            step_ids = next_token
 
 
 def _left_pad_batch(tokenizer: Any, prompts: list[str], device: Any) -> tuple[Any, Any]:

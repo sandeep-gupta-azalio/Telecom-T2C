@@ -17,6 +17,7 @@ from src.inference import (
     build_prompt,
     generate,
     generate_batch,
+    generate_stream,
     greedy_decode,
     greedy_decode_batch,
 )
@@ -291,6 +292,103 @@ class TestGenerate:
         result = generate(model, tokenizer, [{"role": "user", "content": "hi"}], max_new_tokens=5)
         assert result == "decoded-output"
         assert model.generate_called is True
+
+
+class _FakeStreamTokenizer(FakeTokenizer):
+    """decode() maps token ids to single chars (dropping eos, mirroring
+    skip_special_tokens=True on a real special token) so streamed deltas are
+    predictable per step."""
+
+    _CHAR_BY_ID = {3: "a", 4: "b", 5: "c"}
+
+    def decode(self, ids, skip_special_tokens=True):
+        chars = []
+        for token_id in ids.tolist():
+            if skip_special_tokens and token_id == _EOS_ID:
+                continue
+            chars.append(self._CHAR_BY_ID.get(token_id, "?"))
+        return "".join(chars)
+
+
+class _FakeStreamCausalLM(nn.Module):
+    """Emits token_sequence one id per forward call, using a KV cache
+    (past_key_values passed through, not recomputed) — the shape
+    generate_stream's cached decode loop requires."""
+
+    def __init__(self, token_sequence: list[int]):
+        super().__init__()
+        self._linear = nn.Linear(1, 1)
+        self.token_sequence = token_sequence
+        self.calls = 0
+
+    def gradient_checkpointing_disable(self):
+        pass
+
+    def forward(self, input_ids=None, attention_mask=None, use_cache=None, past_key_values=None):
+        class _Output:
+            pass
+
+        token_id = self.token_sequence[self.calls]
+        self.calls += 1
+        batch, seq_len = input_ids.shape
+        vocab_size = max(_VOCAB_SIZE, max(self.token_sequence) + 1)
+        logits = torch.full((batch, seq_len, vocab_size), -10.0)
+        logits[:, -1, token_id] = 10.0
+        out = _Output()
+        out.logits = logits
+        out.past_key_values = "fake-cache"
+        return out
+
+
+class TestGenerateStream:
+    def test_yields_incremental_deltas_matching_final_text(self):
+        model = _FakeStreamCausalLM([3, 4, _EOS_ID])
+        tokenizer = _FakeStreamTokenizer()
+
+        chunks = list(
+            generate_stream(model, tokenizer, [{"role": "user", "content": "hi"}], max_new_tokens=10)
+        )
+
+        deltas = [delta for delta, _ in chunks]
+        assert "".join(deltas) == "ab"
+
+    def test_stops_at_eos_without_reaching_max_new_tokens(self):
+        model = _FakeStreamCausalLM([3, 4, _EOS_ID])
+        tokenizer = _FakeStreamTokenizer()
+
+        chunks = list(
+            generate_stream(model, tokenizer, [{"role": "user", "content": "hi"}], max_new_tokens=10)
+        )
+
+        assert model.calls == 3  # a, b, eos - not the full 10-token budget
+        assert chunks[-1][1] == 3  # last token_index == total steps taken
+
+    def test_token_index_increments_once_per_step_even_on_empty_deltas(self):
+        # The eos step's decode is "" (stripped as a special token) but
+        # still must be yielded with its own token_index so a caller can
+        # learn the true generated-token count from the LAST tuple, not by
+        # counting non-empty deltas.
+        model = _FakeStreamCausalLM([3, _EOS_ID])
+        tokenizer = _FakeStreamTokenizer()
+
+        chunks = list(
+            generate_stream(model, tokenizer, [{"role": "user", "content": "hi"}], max_new_tokens=10)
+        )
+
+        assert [idx for _, idx in chunks] == [1, 2]
+        assert chunks[-1] == ("", 2)
+
+    def test_stops_on_discovered_non_eos_stop_token(self):
+        non_eos_stop_id = 9  # FakeTokenizer's encode() always resolves to token id 9
+        model = _FakeStreamCausalLM([3, non_eos_stop_id])
+        tokenizer = _FakeStreamTokenizer()
+
+        chunks = list(
+            generate_stream(model, tokenizer, [{"role": "user", "content": "hi"}], max_new_tokens=10)
+        )
+
+        assert model.calls == 2
+        assert "".join(delta for delta, _ in chunks) == "a?"
 
 
 class TestPositionIdsFromMask:

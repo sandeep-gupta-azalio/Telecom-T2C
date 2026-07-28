@@ -7,9 +7,10 @@ adapter locally"). Bearer-token-gated since ngrok URLs are public: anyone
 with the URL can otherwise reach /generate.
 """
 
+import json
 import secrets
 import time
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from src import utils
 
@@ -29,6 +30,7 @@ logger = utils.get_logger("server")
 # Install section), so there's no CPU-test-collection cost to paying for
 # them at import time the way there would be for trl/unsloth.
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 
@@ -56,6 +58,10 @@ class ChatCompletionRequest(BaseModel):
     # why: a documented Gemma+PEFT model.generate() workaround), so there
     # is no sampling temperature to honor here.
     temperature: Optional[float] = None
+    # When true, respond as an SSE stream of chat.completion.chunk events
+    # (OpenAI's streaming shape) via inference.generate_stream, so a client
+    # can measure real time-to-first-token instead of only total latency.
+    stream: Optional[bool] = None
 
 
 class ChatCompletionChoice(BaseModel):
@@ -119,6 +125,49 @@ def build_app(model: Any, tokenizer: Any, api_token: str, default_max_new_tokens
         logger.info("Generated %d chars in %.1fs", len(text), elapsed)
         return text, elapsed
 
+    def _stream_chat_completion_chunks(
+        messages: list[Message], max_new_tokens: int, response_model_name: str
+    ) -> Iterator[str]:
+        """SSE body for stream=True: one chat.completion.chunk per non-empty
+        delta, a final chunk carrying usage.completion_tokens, then [DONE] —
+        mirrors OpenAI's streaming shape closely enough for an unmodified
+        OpenAI-compatible client to consume (see build_app's own docstring
+        for why /chat/completions exists at all).
+
+        `messages` must already be validated non-empty by the caller — this
+        function is a generator, so raising HTTPException from inside it
+        would happen only once the ASGI framework starts iterating (after
+        the 200 status/headers are already committed), which is too late
+        for FastAPI to turn into a proper error response.
+        """
+        message_dicts = [m.model_dump() for m in messages]
+        completion_id = f"t2c-{secrets.token_hex(8)}"
+        start = time.monotonic()
+        last_token_index = 0
+        for delta, token_index in inference.generate_stream(
+            model, tokenizer, message_dicts, max_new_tokens=max_new_tokens
+        ):
+            last_token_index = token_index
+            if delta:
+                chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "model": response_model_name,
+                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+        elapsed = time.monotonic() - start
+        logger.info("Streamed %d tokens in %.1fs", last_token_index, elapsed)
+        final_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "model": response_model_name,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": last_token_index},
+        }
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok"}
@@ -131,15 +180,26 @@ def build_app(model: Any, tokenizer: Any, api_token: str, default_max_new_tokens
         text, elapsed = _run_generate(request.messages, request.max_new_tokens or default_max_new_tokens)
         return GenerateResponse(generated_text=text, elapsed_seconds=elapsed)
 
-    @app.post("/chat/completions", response_model=ChatCompletionResponse)
+    @app.post("/chat/completions", response_model=None)
     def chat_completions_endpoint(
         request: ChatCompletionRequest, authorization: Optional[str] = Header(None)
-    ) -> ChatCompletionResponse:
+    ):
         _check_auth(authorization)
-        text, _elapsed = _run_generate(request.messages, request.max_tokens or default_max_new_tokens)
+        if not request.messages:
+            raise HTTPException(status_code=400, detail="messages must be a non-empty list")
+        max_new_tokens = request.max_tokens or default_max_new_tokens
+        response_model_name = request.model or "t2c-gemma4"
+
+        if request.stream:
+            return StreamingResponse(
+                _stream_chat_completion_chunks(request.messages, max_new_tokens, response_model_name),
+                media_type="text/event-stream",
+            )
+
+        text, _elapsed = _run_generate(request.messages, max_new_tokens)
         return ChatCompletionResponse(
             id=f"t2c-{secrets.token_hex(8)}",
-            model=request.model or "t2c-gemma4",
+            model=response_model_name,
             choices=[
                 ChatCompletionChoice(index=0, message=Message(role="assistant", content=text))
             ],
