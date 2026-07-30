@@ -1,14 +1,23 @@
 #!/usr/bin/env python
 """Run the lookup-level robustness benchmark from your local PC against a
-hosted (Colab/Kaggle + ngrok) inference server — no GPU/model needed
-locally, since generation happens on the remote server via
-src/server.py's streaming /chat/completions endpoint. See README
-"Running the lookup-level benchmark locally".
+hosted inference server — no GPU/model needed locally, since generation
+happens on whichever server this script talks to over HTTP. Two providers:
 
-Usage:
+  --provider openai (default): a Colab/Kaggle-hosted, ngrok-tunneled
+      src/server.py, via its streaming /chat/completions endpoint.
+  --provider ollama: a model already `ollama create`'d on this same
+      machine (or another one on your network), via Ollama's own
+      streaming /api/chat endpoint — no bearer token needed.
+
+See README "Running the lookup-level benchmark locally".
+
+Usage (openai/ngrok):
     python scripts/run_remote_lookup_benchmark.py \\
         --base-url https://<your-subdomain>.ngrok-free.dev \\
         --api-token "$OPENAI_API_KEY"
+
+Usage (ollama):
+    python scripts/run_remote_lookup_benchmark.py --provider ollama
 
 Every per-query result (generated text, PASS_4 parse, consistency-with-
 Level-1, and performance: TTFT, total latency, tokens/sec) is appended to a
@@ -35,17 +44,36 @@ from src.lookup_level_queries import (  # noqa: E402
     LOOKUP_LEVEL_DEPLOYMENT_CONTEXT,
     LOOKUP_LEVEL_SYSTEM_PROMPT,
 )
-from src.remote_client import RemoteGenerationMetrics, generate_remote, summarize_remote_metrics  # noqa: E402
+from src.remote_client import (  # noqa: E402
+    RemoteGenerationMetrics,
+    generate_ollama,
+    generate_remote,
+    summarize_remote_metrics,
+)
+
+_DEFAULT_BASE_URL_BY_PROVIDER = {"openai": None, "ollama": "http://localhost:11434"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--base-url", required=True, help="e.g. https://<your-subdomain>.ngrok-free.dev")
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "ollama"],
+        default="openai",
+        help="'openai': the ngrok-tunneled src/server.py. 'ollama': a locally ollama-created model.",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="e.g. https://<your-subdomain>.ngrok-free.dev for --provider openai. "
+        "Defaults to http://localhost:11434 for --provider ollama.",
+    )
     parser.add_argument(
         "--api-token",
         default=os.environ.get("OPENAI_API_KEY") or os.environ.get("T2C_API_TOKEN"),
-        help="Bearer token printed by the notebook's Start Server cell. "
-        "Defaults to $OPENAI_API_KEY, then $T2C_API_TOKEN.",
+        help="Bearer token printed by the notebook's Start Server cell. Only used for "
+        "--provider openai (Ollama has no built-in auth). Defaults to $OPENAI_API_KEY, "
+        "then $T2C_API_TOKEN.",
     )
     parser.add_argument("--model", default="t2c-gemma4")
     parser.add_argument("--max-tokens", type=int, default=400)
@@ -61,7 +89,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if not args.api_token:
+    base_url = args.base_url or _DEFAULT_BASE_URL_BY_PROVIDER[args.provider]
+    if not base_url:
+        print(f"error: --base-url is required for --provider {args.provider}", file=sys.stderr)
+        return 2
+    if args.provider == "openai" and not args.api_token:
         print(
             "error: no API token given (--api-token, or set OPENAI_API_KEY / T2C_API_TOKEN)",
             file=sys.stderr,
@@ -83,14 +115,19 @@ def main(argv: list[str] | None = None) -> int:
     metrics_by_query: list[RemoteGenerationMetrics] = []
 
     def decode_fn(_model: object, _tokenizer: object, messages: list[dict], max_new_tokens: int) -> str:
-        text, metrics = generate_remote(
-            args.base_url,
-            args.api_token,
-            messages,
-            max_tokens=max_new_tokens,
-            model=args.model,
-            timeout=args.timeout,
-        )
+        if args.provider == "ollama":
+            text, metrics = generate_ollama(
+                base_url, messages, model=args.model, max_tokens=max_new_tokens, timeout=args.timeout
+            )
+        else:
+            text, metrics = generate_remote(
+                base_url,
+                args.api_token,
+                messages,
+                max_tokens=max_new_tokens,
+                model=args.model,
+                timeout=args.timeout,
+            )
         metrics_by_query.append(metrics)
         return text
 

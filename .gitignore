@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 outputs/
+logs/
 *.egg-info/
 .ipynb_checkpoints/
 .venv/

@@ -602,22 +602,45 @@ completely different request shape (`/api/generate` with
 `scripts/run_remote_lookup_benchmark.py` runs the exact same query set as
 Section 7 of `Telecom_T2C_Benchmark.ipynb` (both import from
 `src/lookup_level_queries.py`, so they can't drift apart), but from your own
-PC against the hosted ngrok server instead of inside the notebook — no
-GPU/model/Unsloth needed locally, only the standard library:
+PC against a hosted server instead of inside the notebook — no
+GPU/model/Unsloth needed locally, only the standard library. Two providers,
+via `--provider`:
 
-```bash
-export OPENAI_API_KEY="<bearer token printed by the notebook's Start Server cell>"
-python scripts/run_remote_lookup_benchmark.py \
-  --base-url https://<your-ngrok-subdomain>.ngrok-free.dev
-```
+- **`openai`** (default) — the Colab/Kaggle ngrok server above:
 
-(`--api-token` also works directly if you'd rather not reuse
-`OPENAI_API_KEY`; `T2C_API_TOKEN` is checked as a second fallback env var.)
+  ```bash
+  export OPENAI_API_KEY="<bearer token printed by the notebook's Start Server cell>"
+  python scripts/run_remote_lookup_benchmark.py \
+    --base-url https://<your-ngrok-subdomain>.ngrok-free.dev
+  ```
 
-This needs `stream=True` support on `/chat/completions`
-(`inference.generate_stream` + `src/server.py`'s SSE response), which the
-in-notebook run doesn't use — streaming lets the client measure **real**
-per-query performance, not just pass/fail correctness:
+  (`--api-token` also works directly if you'd rather not reuse
+  `OPENAI_API_KEY`; `T2C_API_TOKEN` is checked as a second fallback env var.)
+
+- **`ollama`** — a model already `ollama create`'d locally (see "Running the
+  fine-tuned model in Ollama" below), no bearer token needed:
+
+  ```bash
+  python scripts/run_remote_lookup_benchmark.py --provider ollama
+  ```
+
+  Defaults to `http://localhost:11434`; pass `--base-url` if Ollama is on a
+  different host/port. `--model` defaults to `t2c-gemma4`, matching that
+  section's `ollama create t2c-gemma4 -f Modelfile` example — pass
+  `--model <your-tag>` if you named it something else.
+
+Both talk to `src/remote_client.py`'s two client functions
+(`generate_remote` for the ngrok server's OpenAI-compatible
+`/chat/completions`, `generate_ollama` for Ollama's own native
+`/api/chat`) — same `RemoteGenerationMetrics`/log-file/summary handling
+either way, just a different wire format and a different source for the
+tokens/sec number: `generate_remote` estimates it from streamed-chunk
+wall-clock timing (the ngrok server has no other way to report it),
+`generate_ollama` reads Ollama's own exact `eval_count`/`eval_duration`
+instead of estimating, since Ollama already measures this itself.
+
+Streaming lets the client measure **real** per-query performance, not just
+pass/fail correctness:
 
 - **TTFT** (time to first token) — wall-clock time from request sent to the
   first non-empty SSE content chunk. Dominated by prompt processing, not
@@ -681,6 +704,12 @@ The sibling `t2c` project's `--llm-provider ollama --llm-model t2c-gemma4`
 path at it — see that project's own docs for the prompt-alignment work
 that makes this a valid comparison against the training data in the first
 place (`t2c.tir.l1.build_llm_l1_prompt`/`extract_pass4_envelope`).
+
+Once it's running, `python scripts/run_remote_lookup_benchmark.py
+--provider ollama` (see "Running the lookup-level benchmark locally" above)
+runs this project's own lookup-level robustness check against it directly —
+useful for comparing the GGUF-exported/Ollama-served model's behavior
+against the same adapter served straight from Colab/Kaggle via ngrok.
 
 ---
 

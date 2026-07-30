@@ -1,8 +1,9 @@
-"""HTTP client for talking to src/server.py's hosted /chat/completions endpoint
-from a machine with no GPU/model of its own (see README "Testing the adapter
-locally") — used by scripts/run_remote_lookup_benchmark.py to run the
-lookup-level robustness benchmark from the developer's own PC against a
-Colab/Kaggle-hosted, ngrok-tunneled server.
+"""HTTP clients for scripts/run_remote_lookup_benchmark.py: one for
+src/server.py's hosted /chat/completions endpoint (see README "Testing the
+adapter locally") — a Colab/Kaggle-hosted, ngrok-tunneled server — and one
+for a model already `ollama create`'d locally (see README "Running the
+fine-tuned model in Ollama"). Either way, generation happens on a server
+this machine talks to over HTTP, not locally — no GPU/model needed here.
 
 Uses only the standard library (urllib), not `requests` — this module is
 meant to run on a bare local Python install with none of this project's
@@ -96,6 +97,86 @@ def generate_remote(
     tokens_per_second = 0.0
     if tokens_generated > 1 and total > ttft:
         tokens_per_second = (tokens_generated - 1) / (total - ttft)
+
+    metrics = RemoteGenerationMetrics(
+        ttft_seconds=ttft,
+        total_seconds=total,
+        tokens_generated=tokens_generated,
+        tokens_per_second=tokens_per_second,
+    )
+    return "".join(chunks), metrics
+
+
+def generate_ollama(
+    base_url: str,
+    messages: list[dict],
+    model: str = "t2c-gemma4",
+    max_tokens: Optional[int] = None,
+    timeout: float = 120.0,
+) -> tuple[str, RemoteGenerationMetrics]:
+    """Like generate_remote, but speaks Ollama's own streaming POST /api/chat
+    shape instead of the OpenAI-compatible SSE shape src/server.py exposes —
+    for benchmarking a model already `ollama create`'d locally (see README
+    "Running the fine-tuned model in Ollama"). No bearer token: Ollama has
+    no built-in auth, unlike the ngrok server generate_remote() targets.
+
+    Ollama's response is newline-delimited plain JSON (no "data: " prefix,
+    no [DONE] sentinel — the final line instead carries "done": true), and
+    that final line reports exact prompt/decode token counts and durations
+    the serving stack actually measured (eval_count, eval_duration in
+    nanoseconds) — used here for tokens_per_second directly instead of
+    estimating it from chunk-arrival wall-clock timing the way generate_remote
+    must, since this is ground truth from the server, not a client-side
+    approximation. Falls back to the same wall-clock estimate generate_remote
+    uses if an older Ollama build omits those fields.
+
+    Raises urllib.error.HTTPError/URLError on failure, same as generate_remote.
+    """
+    url = f"{base_url.rstrip('/')}/api/chat"
+    payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+    if max_tokens is not None:
+        # Ollama's cap on generated tokens lives under options.num_predict,
+        # not a top-level field the way OpenAI's shape has max_tokens.
+        payload["options"] = {"num_predict": max_tokens}
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=body, method="POST", headers={"Content-Type": "application/json"}
+    )
+
+    start = time.monotonic()
+    ttft: Optional[float] = None
+    chunks: list[str] = []
+    tokens_generated = 0
+    eval_duration_seconds: Optional[float] = None
+
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8").strip()
+            if not line:
+                continue
+            event: dict[str, Any] = json.loads(line)
+            delta = event.get("message", {}).get("content", "")
+            if delta:
+                if ttft is None:
+                    ttft = time.monotonic() - start
+                chunks.append(delta)
+            if event.get("done"):
+                tokens_generated = event.get("eval_count", tokens_generated)
+                eval_duration_ns = event.get("eval_duration")
+                if eval_duration_ns:
+                    eval_duration_seconds = eval_duration_ns / 1e9
+                break
+
+    total = time.monotonic() - start
+    if ttft is None:
+        ttft = total
+
+    if eval_duration_seconds and tokens_generated:
+        tokens_per_second = tokens_generated / eval_duration_seconds
+    elif tokens_generated > 1 and total > ttft:
+        tokens_per_second = (tokens_generated - 1) / (total - ttft)
+    else:
+        tokens_per_second = 0.0
 
     metrics = RemoteGenerationMetrics(
         ttft_seconds=ttft,
