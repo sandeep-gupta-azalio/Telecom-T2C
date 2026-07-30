@@ -112,6 +112,7 @@ def generate_ollama(
     messages: list[dict],
     model: str = "t2c-gemma4",
     max_tokens: Optional[int] = None,
+    think: bool = False,
     timeout: float = 120.0,
 ) -> tuple[str, RemoteGenerationMetrics]:
     """Like generate_remote, but speaks Ollama's own streaming POST /api/chat
@@ -119,6 +120,23 @@ def generate_ollama(
     for benchmarking a model already `ollama create`'d locally (see README
     "Running the fine-tuned model in Ollama"). No bearer token: Ollama has
     no built-in auth, unlike the ngrok server generate_remote() targets.
+
+    think=False (the default) explicitly disables Ollama's "thinking" mode
+    via the request's top-level "think" field. Added after a real run
+    against an Ollama-served t2c-gemma4 with think left unset: every query
+    hit exactly max_tokens per eval_count, yet message.content was empty
+    or cut off mid-PASS_1/PASS_2 — i.e. the reported token budget was
+    fully spent on something never reaching this function's returned text
+    at all. The leading suspect is Ollama auto-detecting this as a
+    thinking-capable model and routing reasoning tokens to a separate
+    message.thinking field instead of message.content (not independently
+    confirmed by inspecting that field here, but consistent with the
+    symptom and with Ollama's documented behavior for thinking-capable
+    models) — the same google/gemma-4-12B-it thinking-channel failure
+    mode inference.build_prompt() already documents and avoids for the
+    local/adapter path, where training never demonstrates continuing from
+    that channel, only from a bare PASS_0-4 continuation. Pass think=True
+    only to deliberately compare against that behavior.
 
     Ollama's response is newline-delimited plain JSON (no "data: " prefix,
     no [DONE] sentinel — the final line instead carries "done": true), and
@@ -133,7 +151,7 @@ def generate_ollama(
     Raises urllib.error.HTTPError/URLError on failure, same as generate_remote.
     """
     url = f"{base_url.rstrip('/')}/api/chat"
-    payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+    payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True, "think": think}
     if max_tokens is not None:
         # Ollama's cap on generated tokens lives under options.num_predict,
         # not a top-level field the way OpenAI's shape has max_tokens.

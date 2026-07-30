@@ -715,6 +715,22 @@ against the same adapter served straight from Colab/Kaggle via ngrok.
 
 ## Troubleshooting
 
+**`scripts/run_remote_lookup_benchmark.py --provider ollama` logs
+`tokens_generated` always exactly equal to `--max-tokens`, and `generated`
+in the JSONL log is empty or cut off mid-`PASS_1`/`PASS_2`.** Ollama has
+auto-detected the model as thinking-capable and is routing reasoning
+tokens into a separate `message.thinking` field instead of
+`message.content` — the entire token budget gets spent there, with little
+or nothing left for the actual trained `PASS_0...PASS_4` answer. This is
+the exact same `google/gemma-4-12B-it` thinking-channel behavior
+`inference.build_prompt()` already documents and avoids for the
+local/adapter path (training never demonstrates continuing from that
+channel). Fixed by default — `generate_ollama()` sends `"think": false` in
+every request — so if you're seeing this, confirm you're on a version of
+this script that includes it (`git log -1 -- src/remote_client.py` should
+show the `think=false` commit); `--think` (CLI) / `think=True` (Python)
+exists only to deliberately reproduce the broken behavior for comparison.
+
 **You've re-run Install + "Restart session" a couple of times already and
 keep hitting a *different* missing-symbol `ImportError` each time** (not the
 same one repeating) — e.g. `BloomPreTrainedModel`, then `auto_docstring`,

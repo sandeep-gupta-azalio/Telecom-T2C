@@ -77,6 +77,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default="t2c-gemma4")
     parser.add_argument("--max-tokens", type=int, default=400)
+    parser.add_argument(
+        "--think",
+        action="store_true",
+        help="--provider ollama only: let Ollama's 'thinking' mode run instead of disabling it. "
+        "Off by default because training never demonstrates continuing from that channel (see "
+        "generate_ollama's docstring) — the whole max-tokens budget can otherwise be spent on "
+        "invisible reasoning tokens instead of the trained PASS_0-4 answer.",
+    )
     parser.add_argument("--timeout", type=float, default=120.0, help="Per-query HTTP timeout, in seconds.")
     parser.add_argument(
         "--log-file",
@@ -117,7 +125,12 @@ def main(argv: list[str] | None = None) -> int:
     def decode_fn(_model: object, _tokenizer: object, messages: list[dict], max_new_tokens: int) -> str:
         if args.provider == "ollama":
             text, metrics = generate_ollama(
-                base_url, messages, model=args.model, max_tokens=max_new_tokens, timeout=args.timeout
+                base_url,
+                messages,
+                model=args.model,
+                max_tokens=max_new_tokens,
+                think=args.think,
+                timeout=args.timeout,
             )
         else:
             text, metrics = generate_remote(

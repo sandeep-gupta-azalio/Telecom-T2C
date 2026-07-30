@@ -189,6 +189,28 @@ class TestGenerateOllama:
         generate_ollama("http://localhost:11434", [{"role": "user", "content": "hi"}], max_tokens=128)
         assert captured["body"]["options"] == {"num_predict": 128}
 
+    def test_think_defaults_to_false(self, monkeypatch):
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return _FakeSSEResponse(_ollama_lines({"message": {"content": ""}, "done": True}))
+
+        monkeypatch.setattr("src.remote_client.urllib.request.urlopen", fake_urlopen)
+        generate_ollama("http://localhost:11434", [{"role": "user", "content": "hi"}])
+        assert captured["body"]["think"] is False
+
+    def test_think_true_is_sent_when_requested(self, monkeypatch):
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return _FakeSSEResponse(_ollama_lines({"message": {"content": ""}, "done": True}))
+
+        monkeypatch.setattr("src.remote_client.urllib.request.urlopen", fake_urlopen)
+        generate_ollama("http://localhost:11434", [{"role": "user", "content": "hi"}], think=True)
+        assert captured["body"]["think"] is True
+
     def test_omits_options_when_max_tokens_not_given(self, monkeypatch):
         captured = {}
 
