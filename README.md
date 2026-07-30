@@ -532,6 +532,52 @@ independent levers, all on by default now:
 
 ## Testing the fine-tuned adapter from your own PC
 
+### Running inference on your own PC directly (no Colab/Kaggle/ngrok)
+
+If you fine-tuned against a smaller base model (e.g.
+`unsloth/gemma-4-E2B-it-qat-q4_0-unquantized` rather than the 12B model the
+rest of this doc assumes) and it actually fits your local GPU's VRAM, you
+don't need any of the Colab/Kaggle/ngrok machinery below —
+`scripts/run_local_inference.py` runs the adapter directly on this machine
+via Unsloth:
+
+```bash
+python scripts/run_local_inference.py --adapter-dir /path/to/your/adapter
+```
+
+This calls `inference.load_model_for_inference()` exactly the way every
+other path in this project does — the base model is read from the
+adapter's own `adapter_config.json` (`base_model_name_or_path`, recorded
+automatically at training time), **not** from `configs/experiment.yaml`'s
+`model.base_model` field, so no config edit is needed regardless of which
+base model you actually trained against. `--query "..."` runs your own
+query instead of the default smoke-test one.
+
+Add `--serve` to also start `src/server.py`'s FastAPI app locally (no
+ngrok tunnel needed — both ends are the same machine) so the rest of this
+project's tooling works against it unmodified:
+
+```bash
+python scripts/run_local_inference.py --adapter-dir /path/to/your/adapter --serve
+# prints a bearer token, then serves on http://127.0.0.1:8000
+python scripts/run_remote_lookup_benchmark.py --provider openai \
+  --base-url http://localhost:8000 --api-token "<printed token>"
+```
+
+Unsloth's install is far less proven on native Windows than on Colab/Linux
+— expect the same kind of multi-round debugging `requirements.txt`'s
+extensive comments document for the Colab path (this project has never
+independently verified the exact pip/wheel set that works on Windows).
+Known rough edges if `import unsloth` fails locally: plain `triton` doesn't
+support Windows at all (`triton-windows` is the fork that does),
+`bitsandbytes` needs a recent version for official Windows wheels
+(`pip install -U bitsandbytes`), and a native extension build may want
+Visual Studio's C++ Build Tools installed. `model.py`'s
+`resolve_attn_implementation()` already falls back to `"sdpa"` when
+flash-attention isn't importable, which is the common case on Windows.
+
+### Hosting on Colab/Kaggle instead
+
 A 12B model needs far more VRAM than most laptop/desktop GPUs have — even
 4-bit QLoRA weights alone are roughly 6GB+, before KV cache/activations.
 `notebooks/Telecom_T2C_Inference_Server.ipynb` works around this by keeping
