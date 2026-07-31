@@ -36,7 +36,7 @@ data:
 # model: base model + adapter continuation.
 # -----------------------------------------------------------------------------
 model:
-  base_model: google/gemma-4-12B-it          # HF repo id
+  base_model: unsloth/gemma-4-E2B-it-qat-q4_0-unquantized  # HF repo id
   continue_adapter: null                     # path to a prior LoRA adapter dir; null = fresh LoRA init
   hf_token_env_var: HF_TOKEN                 # env var / Colab secret name holding the HF token
 

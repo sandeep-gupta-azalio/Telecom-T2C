@@ -1,10 +1,18 @@
 # Telecom-T2C-Trainer
 
 Production fine-tuning framework for continue-LoRA (QLoRA) training of
-`google/gemma-4-12B-it` on a telecom network-inventory NL query dataset,
-via [Unsloth](https://github.com/unslothai/unsloth). Runs on Google Colab
-(A100 40GB recommended); the notebook only orchestrates — all logic lives
-in `src/`.
+Gemma 4 models on a telecom network-inventory NL query dataset, via
+[Unsloth](https://github.com/unslothai/unsloth). Currently configured
+(`configs/experiment.yaml`'s `model.base_model`) for
+`unsloth/gemma-4-E2B-it-qat-q4_0-unquantized`; this project was originally
+authored and verified against `google/gemma-4-12B-it`, which is why most of
+this doc's confirmed-behavior notes (chat template quirks, stop tokens,
+install version pins) cite that model specifically — they have not been
+independently re-verified against the smaller E2B model, though the
+lookup-level benchmark has produced correctly-formatted PASS_0-4 output
+against an E2B adapter in practice (see "Running the lookup-level benchmark
+locally"). Runs on Google Colab (A100 40GB recommended); the notebook only
+orchestrates — all logic lives in `src/`.
 
 **Adapters are never merged into the base model**, on any run (fresh init or
 continuation). LoRA weights are always kept as a separate adapter.

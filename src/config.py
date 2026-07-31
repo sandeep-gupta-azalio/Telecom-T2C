@@ -50,7 +50,7 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
-    base_model: str = "google/gemma-4-12B-it"
+    base_model: str = "unsloth/gemma-4-E2B-it-qat-q4_0-unquantized"
     continue_adapter: Optional[str] = None
     hf_token_env_var: str = "HF_TOKEN"
 

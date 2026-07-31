@@ -40,7 +40,7 @@ class TestLoadConfig:
         config = load_config(path)
         assert config.data.train_path == "train.jsonl"
         assert config.data.val_path == "val.jsonl"
-        assert config.model.base_model == "google/gemma-4-12B-it"
+        assert config.model.base_model == "unsloth/gemma-4-E2B-it-qat-q4_0-unquantized"
         assert config.model.continue_adapter is None
         assert config.training.reasoning is True
 
@@ -56,7 +56,7 @@ class TestLoadConfig:
     def test_real_shipped_config_loads(self):
         shipped = Path(__file__).resolve().parent.parent / "configs" / "experiment.yaml"
         config = load_config(shipped)
-        assert config.model.base_model == "google/gemma-4-12B-it"
+        assert config.model.base_model == "unsloth/gemma-4-E2B-it-qat-q4_0-unquantized"
 
     def test_bare_scientific_notation_learning_rate_coerced_to_float(self, tmp_path):
         # PyYAML's SafeLoader does not recognize bare scientific notation
@@ -163,4 +163,4 @@ class TestSaveResolvedConfig:
         assert out_path.is_file()
         reloaded = yaml.safe_load(out_path.read_text(encoding="utf-8"))
         assert reloaded["data"]["train_path"] == "train.jsonl"
-        assert reloaded["model"]["base_model"] == "google/gemma-4-12B-it"
+        assert reloaded["model"]["base_model"] == "unsloth/gemma-4-E2B-it-qat-q4_0-unquantized"
