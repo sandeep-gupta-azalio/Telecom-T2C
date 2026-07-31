@@ -5,12 +5,14 @@ src.inference.generate so no real model/tokenizer is needed.
 """
 
 import json
+import time
 
 import pytest
 
 pytest.importorskip("fastapi", reason="fastapi not installed in this environment")
 
 from src import inference, server
+from src.server import _wait_for_cloudflare_url
 
 
 @pytest.fixture
@@ -187,3 +189,57 @@ class TestChatCompletionsStreamingEndpoint:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/json")
         assert response.json()["choices"][0]["message"]["content"] == "fake reply"
+
+
+class _FakeStdout:
+    def __init__(self, lines: list[str]):
+        self._lines = iter(lines)
+
+    def readline(self) -> str:
+        return next(self._lines, "")
+
+
+class _FakeTunnelProcess:
+    def __init__(self, lines: list[str]):
+        self.stdout = _FakeStdout(lines)
+
+
+class _HangingStdout:
+    """readline() blocks far longer than any timeout_seconds used below —
+    proves _wait_for_cloudflare_url's deadline is enforced by the queue.get
+    timeout, not by hoping readline() itself returns promptly."""
+
+    def readline(self) -> str:
+        time.sleep(5)
+        return "too slow\n"
+
+
+class TestWaitForCloudflareUrl:
+    def test_returns_url_found_in_boxed_cloudflared_output(self):
+        lines = [
+            "2024-01-01T00:00:00Z INF Thank you for trying Cloudflare Tunnel\n",
+            "2024-01-01T00:00:00Z INF +---------------------------------------------------------------+\n",
+            "2024-01-01T00:00:00Z INF |  https://whether-legacy-ultra-obvious.trycloudflare.com        |\n",
+            "2024-01-01T00:00:00Z INF +---------------------------------------------------------------+\n",
+        ]
+        url = _wait_for_cloudflare_url(_FakeTunnelProcess(lines), timeout_seconds=2.0)
+        assert url == "https://whether-legacy-ultra-obvious.trycloudflare.com"
+
+    def test_returns_first_matching_url_when_stream_has_more_after_it(self):
+        lines = [
+            "https://first-one.trycloudflare.com appears here\n",
+            "https://second-one.trycloudflare.com would be wrong to return\n",
+        ]
+        url = _wait_for_cloudflare_url(_FakeTunnelProcess(lines), timeout_seconds=2.0)
+        assert url == "https://first-one.trycloudflare.com"
+
+    def test_raises_when_stream_ends_without_a_url(self):
+        lines = ["some unrelated log line\n", "cloudflared started but no url yet\n"]
+        with pytest.raises(RuntimeError, match="did not print"):
+            _wait_for_cloudflare_url(_FakeTunnelProcess(lines), timeout_seconds=1.0)
+
+    def test_raises_on_timeout_when_process_never_produces_a_line(self):
+        process = _FakeTunnelProcess([])
+        process.stdout = _HangingStdout()
+        with pytest.raises(RuntimeError, match="did not print"):
+            _wait_for_cloudflare_url(process, timeout_seconds=0.3)

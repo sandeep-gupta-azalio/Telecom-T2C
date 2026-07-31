@@ -24,6 +24,11 @@ Level-1, and performance: TTFT, total latency, tokens/sec) is appended to a
 JSONL log file AS IT ARRIVES — a long run interrupted partway through still
 leaves a usable partial record on disk, not just an in-memory list lost on
 crash/Ctrl-C.
+
+Usage (a single ad-hoc query instead of the full 12-query suite — for a
+quick "does this deployment even work" check):
+    python scripts/run_remote_lookup_benchmark.py --provider ollama \\
+        --query "Show ONU 48575443EC9D3DB0"
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import evaluator  # noqa: E402
+from src.evaluator import LookupLevelQuery  # noqa: E402
 from src.lookup_level_queries import (  # noqa: E402
     DEFAULT_LOOKUP_LEVEL_QUERIES,
     LOOKUP_LEVEL_DEPLOYMENT_CONTEXT,
@@ -76,6 +82,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "then $T2C_API_TOKEN.",
     )
     parser.add_argument("--model", default="t2c-gemma4")
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="Run this single query instead of the full 12-query lookup-level suite — for a "
+        "quick ad-hoc/phase-1 check. matches_level1 is meaningless for a lone query (there's "
+        "nothing else in its group to compare against), but generated text/PASS_4/performance "
+        "still print and log normally.",
+    )
     parser.add_argument("--max-tokens", type=int, default=400)
     parser.add_argument(
         "--think",
@@ -169,10 +183,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"total={metrics.total_seconds:.2f}s tok/s={metrics.tokens_per_second:.1f}"
             )
 
+        queries = (
+            [LookupLevelQuery("adhoc", 1, "Ad-hoc", args.query)]
+            if args.query
+            else DEFAULT_LOOKUP_LEVEL_QUERIES
+        )
         results = evaluator.run_lookup_level_benchmark(
             model=None,
             tokenizer=None,
-            queries=DEFAULT_LOOKUP_LEVEL_QUERIES,
+            queries=queries,
             system_prompt=LOOKUP_LEVEL_SYSTEM_PROMPT,
             deployment_context=LOOKUP_LEVEL_DEPLOYMENT_CONTEXT,
             decode_fn=decode_fn,

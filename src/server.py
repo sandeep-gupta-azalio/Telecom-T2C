@@ -1,13 +1,15 @@
-"""Minimal HTTP inference server, meant to be tunneled out via ngrok for local testing.
+"""Minimal HTTP inference server, meant to be tunneled out (via ngrok or a
+Cloudflare quick tunnel) for local testing.
 
 Not part of the training path — this exists purely so a Colab-hosted GPU can
 serve the fine-tuned adapter to a request made from the developer's own PC,
 which has no GPU capable of running a 12B model (see README "Testing the
-adapter locally"). Bearer-token-gated since ngrok URLs are public: anyone
+adapter locally"). Bearer-token-gated since the tunnel URL is public: anyone
 with the URL can otherwise reach /generate.
 """
 
 import json
+import re
 import secrets
 import time
 from typing import Any, Iterator, Optional
@@ -208,22 +210,20 @@ def build_app(model: Any, tokenizer: Any, api_token: str, default_max_new_tokens
     return app
 
 
-def start_server(app: Any, port: int, ngrok_authtoken: Optional[str] = None, timeout_seconds: float = 15.0):
-    """Start `app` with uvicorn on a background thread and open an ngrok tunnel to it.
+def _start_uvicorn_background(app: Any, port: int, timeout_seconds: float) -> Any:
+    """Start `app` with uvicorn on a background daemon thread; block until it
+    reports started, or raise after timeout_seconds. Shared by start_server
+    (ngrok) and start_server_cloudflare — the tunnel mechanism is the only
+    thing that differs between them.
 
-    Returns (server, tunnel) — pass both to stop_server() to tear down
-    cleanly. Runs uvicorn on its own thread (not the notebook's main thread)
-    so the notebook cell returns immediately instead of blocking; uvicorn's
-    own asyncio loop lives entirely on that thread, so it doesn't conflict
-    with Colab/IPython's main-thread event loop.
+    Runs uvicorn on its own thread (not the notebook's main thread) so the
+    notebook cell returns immediately instead of blocking; uvicorn's own
+    asyncio loop lives entirely on that thread, so it doesn't conflict with
+    Colab/IPython's main-thread event loop.
     """
     import threading
 
     import uvicorn
-    from pyngrok import ngrok
-
-    if ngrok_authtoken:
-        ngrok.set_auth_token(ngrok_authtoken)
 
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)
@@ -236,10 +236,118 @@ def start_server(app: Any, port: int, ngrok_authtoken: Optional[str] = None, tim
         if time.monotonic() > deadline:
             raise RuntimeError(f"uvicorn server did not start within {timeout_seconds}s")
         time.sleep(0.1)
+    return server
+
+
+def start_server(app: Any, port: int, ngrok_authtoken: Optional[str] = None, timeout_seconds: float = 15.0):
+    """Start `app` with uvicorn on a background thread and open an ngrok tunnel to it.
+
+    Returns (server, tunnel) — pass both to stop_server() to tear down
+    cleanly. See start_server_cloudflare() for an alternative that needs no
+    ngrok account/authtoken at all.
+    """
+    from pyngrok import ngrok
+
+    if ngrok_authtoken:
+        ngrok.set_auth_token(ngrok_authtoken)
+
+    server = _start_uvicorn_background(app, port, timeout_seconds)
 
     tunnel = ngrok.connect(port, "http")
     logger.info("Server live at %s (requires the printed bearer token)", tunnel.public_url)
     return server, tunnel
+
+
+_CLOUDFLARE_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+
+
+def _wait_for_cloudflare_url(process: Any, timeout_seconds: float = 30.0) -> str:
+    """Read process.stdout line by line until a *.trycloudflare.com URL
+    appears, or raise RuntimeError on timeout / if the stream ends first
+    without ever printing one.
+
+    Pumps lines on a background daemon thread and waits on a Queue with a
+    real timeout, rather than calling process.stdout.readline() directly in
+    a loop that only checks the deadline between calls — a stalled
+    subprocess would block a bare readline() past the intended timeout
+    regardless of how often the deadline is checked around it.
+    """
+    import queue
+    import threading
+
+    line_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def _pump_lines() -> None:
+        for line in iter(process.stdout.readline, ""):
+            line_queue.put(line)
+        line_queue.put(None)
+
+    threading.Thread(target=_pump_lines, daemon=True).start()
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            line = line_queue.get(timeout=max(0.05, remaining))
+        except queue.Empty:
+            break
+        if line is None:
+            break
+        match = _CLOUDFLARE_URL_PATTERN.search(line)
+        if match:
+            return match.group(0)
+
+    raise RuntimeError(
+        f"cloudflared did not print a *.trycloudflare.com URL within {timeout_seconds}s — "
+        "confirm the `cloudflared` binary is installed and on PATH."
+    )
+
+
+def start_server_cloudflare(
+    app: Any, port: int, timeout_seconds: float = 15.0, tunnel_timeout_seconds: float = 30.0
+):
+    """Like start_server, but tunnels via Cloudflare's free "quick tunnel"
+    (`cloudflared tunnel --url ...`) instead of ngrok — no account or
+    authtoken needed, unlike ngrok.connect(). Requires the `cloudflared`
+    binary already on PATH (see the notebook's Install section).
+
+    Returns (server, tunnel_process, public_url) — pass server and
+    tunnel_process to stop_server_cloudflare() to tear down cleanly.
+    public_url is returned directly rather than as an attribute on some
+    tunnel object (unlike ngrok's Tunnel), since a Cloudflare quick tunnel's
+    URL isn't otherwise queryable — it only ever appears once, printed to
+    the `cloudflared` subprocess's own stdout as it starts.
+    """
+    import subprocess
+
+    server = _start_uvicorn_background(app, port, timeout_seconds)
+
+    tunnel_process = subprocess.Popen(
+        ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    try:
+        public_url = _wait_for_cloudflare_url(tunnel_process, tunnel_timeout_seconds)
+    except RuntimeError:
+        tunnel_process.terminate()
+        raise
+
+    logger.info("Server live at %s (requires the printed bearer token)", public_url)
+    return server, tunnel_process, public_url
+
+
+def stop_server_cloudflare(server: Any, tunnel_process: Any) -> None:
+    """Tear down a Cloudflare quick tunnel and signal uvicorn's background thread to stop."""
+    tunnel_process.terminate()
+    try:
+        tunnel_process.wait(timeout=10)
+    except Exception:
+        tunnel_process.kill()
+    server.should_exit = True
 
 
 def stop_server(server: Any, tunnel: Any) -> None:

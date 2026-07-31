@@ -602,6 +602,39 @@ machine reaches it.
 - The tunnel stays up only as long as the Colab runtime is connected;
   closing the tab or letting Colab idle-disconnect kills it.
 
+**Colab runtime type (T4 vs. A100)** is a Colab Runtime menu setting
+(Runtime → Change runtime type → Hardware accelerator/GPU type), not
+anything this notebook's code controls — pick A100 there before running
+Section 1's Runtime Check if you have Colab Pro/Pay-as-you-go access to it.
+`model.py`'s `detect_gpu_profile()` picks sensible batch-size/sample-count
+defaults per GPU class automatically either way.
+
+**Cloudflare tunnel instead of ngrok**: Section 8b
+(`server.start_server_cloudflare()`) is an alternative to Section 8a's
+ngrok cell — same server, tunneled via Cloudflare's free "quick tunnel"
+(`cloudflared tunnel --url ...`) instead. **No account or authtoken
+needed at all**, unlike ngrok. Run one of 8a/8b, not both (they'd fight
+over the same port); Section 10's Stop Server cell tears down whichever
+one you used automatically. The resulting URL looks like
+`https://<random-words>.trycloudflare.com` and works with every tool in
+this doc that takes `--base-url`/`api_base` exactly like an ngrok URL does
+— see "Running the lookup-level benchmark locally" below.
+
+> **Note on Unsloth's own "Unsloth Studio" Colab notebook**: Unsloth
+> publishes a separate, fuller-featured hosting notebook
+> ([`studio/Unsloth_Studio_Colab.ipynb`](https://colab.research.google.com/github/unslothai/unsloth/blob/main/studio/Unsloth_Studio_Colab.ipynb))
+> that also serves an OpenAI-compatible `/v1/chat/completions` endpoint over
+> a Cloudflare tunnel, with `sk-unsloth-...`-style API keys. It launches a
+> full separate web application (its own admin UI behind the tunnel), not
+> something driven by editing notebook cells — this project has **not**
+> verified its exact workflow for importing a custom-trained LoRA adapter
+> (its docs pages for that were unavailable/404 as of this writing), so
+> it isn't documented here beyond noting it exists. If you're already
+> using it successfully, everything in "Running the lookup-level benchmark
+> locally" below still applies — `--provider openai --base-url
+> https://<its-url>/v1` talks to it the same way it talks to this
+> project's own server (see the `/v1` note in that section).
+
 ### Same thing, hosted on Kaggle
 
 `notebooks/Telecom_T2C_Inference_Server_Kaggle.ipynb` is the same ngrok-tunneled
@@ -663,6 +696,14 @@ via `--provider`:
   (`--api-token` also works directly if you'd rather not reuse
   `OPENAI_API_KEY`; `T2C_API_TOKEN` is checked as a second fallback env var.)
 
+  `--base-url` must point at wherever `/chat/completions` actually lives.
+  This project's own `src/server.py` exposes it bare (no `/v1`), matching
+  the example above — but any OTHER genuine OpenAI-compatible server
+  (Ollama's own `/v1/chat/completions` compat mode, a Cloudflare-tunneled
+  Unsloth Studio instance, etc.) puts it under `/v1`, so pass `--base-url
+  https://<host>/v1` for those instead — `generate_remote()` always appends
+  `/chat/completions` to exactly what you give it, nothing more.
+
 - **`ollama`** — a model already `ollama create`'d locally (see "Running the
   fine-tuned model in Ollama" below), no bearer token needed:
 
@@ -704,6 +745,20 @@ log file **as it arrives** (default `logs/lookup_level_benchmark_<timestamp>.jso
 override with `--log-file`) — a run interrupted partway through (Ctrl-C, a
 dropped tunnel, a timeout) still leaves a usable partial record on disk
 rather than losing everything held only in memory.
+
+**Testing a single ad-hoc query** instead of the full 12-query suite — for
+a quick "is this deployment even working" check, phase-1 exploration, or
+reproducing something you saw manually — pass `--query`:
+
+```bash
+python scripts/run_remote_lookup_benchmark.py --provider ollama \
+  --query "Show ONU 48575443EC9D3DB0"
+```
+
+Same provider/base-url/log-file handling as the full suite; `matches_level1`
+is meaningless for a lone query (nothing else in its group to compare
+against), but the generated text, parsed PASS_4 envelope, and TTFT/tokens-
+per-sec all print and log exactly as normal.
 
 ## Running the fine-tuned model in Ollama
 
